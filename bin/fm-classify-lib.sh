@@ -1600,6 +1600,15 @@ crew_state_name() {  # <crew-state-line>
   [ -n "$state" ] && printf '%s' "$state" || printf 'unknown'
 }
 
+# 0 only for the one done outcome that remains intentionally live: CI checks are
+# green and no-mistakes is still monitoring the open PR for merge or close. Other
+# done details include the merge/close event itself and must remain actionable.
+# Match fm-crew-state.sh's complete structured output so free-text lookalikes do
+# not widen this exception to generic completed work.
+crew_state_is_done_monitoring() {  # <crew-state-line>
+  [ "$1" = 'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' ]
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from one crew_state_line result ("state: <s> · source: <src> · <detail>").
 # Prints exactly one token:
@@ -1628,7 +1637,8 @@ crew_absorb_class_from_line() {  # <crew-state-line>
 # One fm-crew-state.sh read serves BOTH ordinary absorb reasons at once. Reading
 # the state authoritatively (not the status log) keeps run-step precedence for an
 # actually active run. A watcher reconciling a separate current `paused:` line may
-# additionally recognize the structured `done` state as a declared finished wait.
+# additionally recognize the exact checks-green monitoring outcome as a declared
+# finished wait; other done outcomes remain actionable.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.

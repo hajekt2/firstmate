@@ -702,14 +702,15 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# A current paused declaration plus authoritative done state is a finished wait,
-# so it keeps the bounded pause cadence even while the healthy agent process remains
-# present to monitor merge/close. An active working run still takes precedence.
+# A current paused declaration plus the authoritative checks-green monitoring
+# outcome is a finished wait, so it keeps the bounded pause cadence even while the
+# healthy agent process remains present. A merged/closed outcome stays actionable,
+# and an active working run still takes precedence.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification
 # is recovered only for a confidently dead ordinary crew, or for a secondmate,
 # whose endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind state_line state_name
+  local win=$1 task=$2 key last recheck_file class agent_alive kind state_line
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -723,7 +724,7 @@ pause_state_class() {  # <window> <task>
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if status_is_paused "$last" && [ "$(cat "$recheck_file" 2>/dev/null || true)" = "done" ]; then
+    if status_is_paused "$last" && [ "$(cat "$recheck_file" 2>/dev/null || true)" = "done-monitoring" ]; then
       printf 'paused'
       return
     fi
@@ -739,15 +740,14 @@ pause_state_class() {  # <window> <task>
     return
   fi
   state_line=$(crew_state_line "$task" 2>/dev/null) || true
-  state_name=$(crew_state_name "$state_line")
   class=$(crew_absorb_class_from_line "$state_line")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
     return
   fi
-  if status_is_paused "$last" && [ "$state_name" = "done" ]; then
-    printf 'done' > "$recheck_file"
+  if status_is_paused "$last" && crew_state_is_done_monitoring "$state_line"; then
+    printf 'done-monitoring' > "$recheck_file"
     printf 'paused'
     return
   fi

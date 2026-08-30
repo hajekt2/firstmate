@@ -462,6 +462,12 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_state_name "$line")" = paused ] || fail "crew_state_name did not retain the structured state"
   [ "$(crew_absorb_class_from_line "$line")" = paused ] \
     || fail "captured crew state did not retain its absorb classification"
+  crew_state_is_done_monitoring \
+    'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' \
+    || fail "the exact checks-green monitoring outcome was not recognized"
+  ! crew_state_is_done_monitoring \
+    'state: done · source: run-step · run passed: PR merged/closed' \
+    || fail "a merged-or-closed outcome was mistaken for checks-green monitoring"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
@@ -1273,7 +1279,7 @@ test_done_monitoring_declared_pause_uses_long_cadence() {
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green, still monitoring for merge/close' \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -1288,6 +1294,41 @@ test_done_monitoring_declared_pause_uses_long_cadence() {
   [ -e "$state/.paused-$key" ] || fail "done-and-monitoring declared pause did not retain pause tracking"
   [ ! -e "$state/.stale-since-$key" ] || fail "done-and-monitoring declared pause started a wedge timer"
   pass "done-and-monitoring honors the current declared pause on the long cadence"
+}
+
+# A landed or closed PR is terminal even though fm-crew-state uses the same `done`
+# state token as checks-green monitoring. The structured detail is the discriminator:
+# `run passed: PR merged/closed` must surface immediately so firstmate can tear the
+# task down, never inherit the old pause declaration's long wait cadence.
+test_merged_or_closed_declared_pause_surfaces_promptly() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case merged-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/delivered.status"
+  window="test:fm-delivered"
+  printf 'idle healthy agent after PR landing\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/delivered.meta"
+  printf 'paused: PR checks green, awaiting the captain merge decision\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-delivered_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle healthy agent after PR landing")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · run passed: PR merged/closed' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "merged-or-closed outcome was absorbed on the old pause cadence"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "merged-or-closed outcome did not surface promptly: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "merged-or-closed outcome was mislabeled as a declared wait: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "merged-or-closed outcome was mislabeled as a possible wedge: $(cat "$out")"
+  pass "merged-or-closed done state surfaces promptly despite the old pause declaration"
 }
 
 # The pause declaration is the discriminator, not completion itself. A completed
@@ -1310,7 +1351,7 @@ test_done_monitoring_without_pause_still_wedge_escalates() {
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
 
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green, still monitoring for merge/close'
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
   [ "$(crew_absorb_class delivered)" = none ] \
     || fail "done attribution became absorbable without a declared pause"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3238,6 +3279,7 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_done_monitoring_declared_pause_uses_long_cadence
+test_merged_or_closed_declared_pause_surfaces_promptly
 test_done_monitoring_without_pause_still_wedge_escalates
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
