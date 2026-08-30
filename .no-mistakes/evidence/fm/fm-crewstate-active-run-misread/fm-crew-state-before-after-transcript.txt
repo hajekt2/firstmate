@@ -1,0 +1,12 @@
+crew worktree head:   430b1c95
+active run head:      33d6e271ce34e4397b0fb98ae63fff840cc7b955 (exists ONLY in the gate clone)
+
+=== BEFORE (base bin/fm-crew-state.sh @ debe4bf) ===
+state: failed · source: status-log · previous validation run failed
+
+=== AFTER (target bin/fm-crew-state.sh @ b307d60) ===
+state: working · source: run-step · validating (running)
+=== genuinely failed run, no active successor ===
+state: failed · source: run-step · run failed
+=== passed run, same head binding ===
+state: done · source: run-step · run passed: PR merged/closed
