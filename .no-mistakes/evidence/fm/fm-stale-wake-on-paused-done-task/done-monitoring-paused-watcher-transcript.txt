@@ -1,0 +1,16 @@
+Watcher surfacing transcript for the reported scenario, driven end-to-end through the REAL bin/fm-watch.sh
+(scenario: ship task whose no-mistakes run reports 'state: done · source: run-step · checks green, still monitoring
+ for merge/close' while its status log declares 'paused: PR checks green, awaiting the captain merge decision';
+ idle pane aged 500s; hermetic state dir, fake tmux + fake fm-crew-state.sh)
+
+=== BEFORE the fix (base commit debe4bf) ===
+watcher exit code: 0 (0 = wake absorbed silently, non-zero = surfaced a wake)
+--- watcher output (verbatim):
+stale: test:fm-delivered
+--- pause tracking marker: present; wedge timer: absent
+
+=== AFTER the fix (target commit 868f9d0) ===
+watcher exit code: 0 (0 = wake absorbed silently, non-zero = surfaced a wake)
+--- watcher output (verbatim):
+stale: test:fm-delivered (paused 501s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)
+--- pause tracking marker: present; wedge timer: absent
