@@ -1,0 +1,5 @@
+$ bin/fm-crew-state.sh feat-openpr   # completed passed run, PR #1 still open
+state: done · source: run-step · run passed
+
+$ bin/fm-crew-state.sh feat-openpr | grep -iE "merged|closed" || echo "no merged/closed claim in output"
+no merged/closed claim in output
