@@ -229,17 +229,14 @@ test_remote_delivery_proof_is_required_only_for_pushed_modes() {
     id="brief-remote-proof-$mode"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
-    assert_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
-      "$mode brief does not distinguish a missing upstream"
-    # shellcheck disable=SC2016  # Shell variables must stay literal in the generated command.
-    assert_grep 'git ls-remote --exit-code --heads "$remote" "$remote_ref"' "$brief" \
-      "$mode brief does not query the remote for the branch"
-    # shellcheck disable=SC2016  # Shell variables must stay literal in the generated command.
-    assert_grep '[ "$remote" != . ]' "$brief" \
-      "$mode brief accepts a local branch as remote delivery proof"
-    # shellcheck disable=SC2016  # Shell variables must stay literal in the generated command.
-    assert_grep 'git merge-base --is-ancestor HEAD "$remote_head"' "$brief" \
-      "$mode brief does not prove the remote branch contains local HEAD"
+    assert_no_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
+      "$mode brief incorrectly requires a configured upstream"
+    assert_grep 'without `-u` is valid delivery' "$brief" \
+      "$mode brief does not permit a push without upstream configuration"
+    assert_grep 'each remote with a live, non-interactive, time-bounded `git ls-remote --heads`' "$brief" \
+      "$mode brief does not require bounded live advertisements from configured remotes"
+    assert_grep 'require an advertised tip to equal local `HEAD` or contain it' "$brief" \
+      "$mode brief does not require live remote containment of local HEAD"
     # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.
     assert_grep 'remote-tracking ref such as `origin/<branch>` is not delivery evidence' "$brief" \
       "$mode brief still permits stale local refs as push proof"
@@ -248,9 +245,7 @@ test_remote_delivery_proof_is_required_only_for_pushed_modes() {
   id='brief-remote-proof-local'
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_no_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
-    "local-only brief incorrectly requires a remote upstream"
-  assert_no_grep 'git ls-remote --exit-code --heads' "$brief" \
+  assert_no_grep 'git ls-remote --heads' "$brief" \
     "local-only brief incorrectly requires a remote branch"
   pass "fm-brief.sh: pushed modes require live remote proof while local-only does not"
 }

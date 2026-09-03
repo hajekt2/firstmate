@@ -731,8 +731,16 @@ test_delivery_acceptance_allows_push_without_upstream() {
   local dir
   dir=$(make_case delivery-without-upstream)
   write_task_meta "$dir"
+  printf '%s\n' delivered > "$dir/wt/delivered.txt"
+  git -C "$dir/wt" add delivered.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "pushed task delivery"
+  git -C "$dir/wt" push -q origin HEAD:refs/heads/task-a
   ! git -C "$dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
     || fail "push-without-upstream fixture unexpectedly has an upstream"
+  [ "$(git -C "$dir/wt" ls-remote origin refs/heads/task-a | awk 'NR == 1 { print $1 }')" \
+      = "$(git -C "$dir/wt" rev-parse HEAD)" ] \
+    || fail "push-without-upstream fixture did not publish its task commit"
 
   run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/stdout" 2> "$dir/stderr" \
     || fail "PR delivery rejected a live remote branch without an upstream"
@@ -741,6 +749,135 @@ test_delivery_acceptance_allows_push_without_upstream() {
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
     || fail "accepted push without upstream did not publish its poll"
   pass "PR delivery accepts a live remote branch without an upstream"
+}
+
+test_delivery_probe_failures_are_bounded_and_actionable() {
+  local behavior expected dir rc
+  while IFS='|' read -r behavior expected; do
+    dir=$(make_case "delivery-probe-$behavior")
+    write_task_meta "$dir"
+    cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+remote_operation=
+for arg in "$@"; do
+  case "$arg" in
+    ls-remote|fetch) remote_operation=$arg; break ;;
+  esac
+done
+if [ -n "$remote_operation" ]; then
+  [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] || exit 90
+  [ "${GCM_INTERACTIVE:-}" = Never ] || exit 91
+  [ "${SSH_ASKPASS_REQUIRE:-}" = never ] || exit 92
+  case "$FM_TEST_REMOTE_GIT_BEHAVIOR" in
+    timeout|budget) sleep 5 ;;
+    failure) exit 93 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+    chmod +x "$dir/fakebin/git"
+    set +e
+    if [ "$behavior" = budget ]; then
+      FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=5 FM_GIT_LIVE_REMOTE_BUDGET_SECS=1 \
+        FM_TEST_REMOTE_GIT_BEHAVIOR=$behavior FM_TEST_REAL_GIT="$REAL_GIT" \
+        run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr"
+    else
+      FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=1 FM_GIT_LIVE_REMOTE_BUDGET_SECS=3 \
+        FM_TEST_REMOTE_GIT_BEHAVIOR=$behavior FM_TEST_REAL_GIT="$REAL_GIT" \
+        run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr"
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$behavior live-remote probe accepted unproven delivery"
+    assert_grep "$expected" "$dir/stderr" "$behavior live-remote probe did not explain how to recover"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "$behavior live-remote probe published a PR poll"
+    assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "$behavior live-remote probe recorded PR metadata"
+  done <<'EOF'
+timeout|probe timed out; check remote connectivity and authentication, then retry
+budget|probe exhausted its overall budget; remove or repair unreachable remotes, then retry
+failure|non-interactive live-remote probe failed; authenticate or repair the remote, then retry
+EOF
+  pass "PR delivery bounds remote probes and explains indeterminate results"
+}
+
+test_delivery_probe_rechecks_head_after_unlock() {
+  local dir rc
+  dir=$(make_case delivery-head-race)
+  write_task_meta "$dir"
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_ls_remote=0
+for arg in "$@"; do
+  [ "$arg" = ls-remote ] && is_ls_remote=1
+done
+if [ "$is_ls_remote" -eq 1 ] && [ ! -e "$FM_TEST_HEAD_RACE_MARKER" ]; then
+  : > "$FM_TEST_HEAD_RACE_MARKER"
+  printf '%s\n' changed > "$FM_TEST_HEAD_RACE_WORKTREE/changed.txt"
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_HEAD_RACE_WORKTREE" add changed.txt
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_HEAD_RACE_WORKTREE" \
+    -c user.name=fmtest -c user.email=fmtest@example.invalid commit -q -m "raced local head"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/fakebin/git"
+
+  set +e
+  FM_TEST_HEAD_RACE_MARKER="$dir/head-raced" FM_TEST_HEAD_RACE_WORKTREE="$dir/wt" \
+    FM_TEST_REAL_GIT="$REAL_GIT" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/8 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ -e "$dir/head-raced" ] || fail "delivery HEAD race did not mutate the worktree during remote proof"
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted a HEAD that changed after remote proof"
+  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+    "delivery HEAD race was not re-probed against the live remote"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "delivery HEAD race published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "delivery HEAD race recorded PR metadata"
+  pass "PR delivery re-probes when worktree HEAD changes outside the metadata lock"
+}
+
+test_delivery_probe_rechecks_metadata_after_unlock() {
+  local dir other rc
+  dir=$(make_case delivery-metadata-race)
+  other="$dir/other-wt"
+  write_task_meta "$dir"
+  mkdir "$other"
+  git -C "$other" init -q
+  git -C "$other" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m "unpublished replacement worktree"
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_ls_remote=0
+for arg in "$@"; do
+  [ "$arg" = ls-remote ] && is_ls_remote=1
+done
+if [ "$is_ls_remote" -eq 1 ] && [ ! -e "$FM_TEST_META_RACE_MARKER" ]; then
+  : > "$FM_TEST_META_RACE_MARKER"
+  sed "s|^worktree=.*|worktree=$FM_TEST_META_RACE_WORKTREE|" \
+    "$FM_TEST_META_RACE_FILE" > "$FM_TEST_META_RACE_TMP"
+  chmod 0600 "$FM_TEST_META_RACE_TMP"
+  mv "$FM_TEST_META_RACE_TMP" "$FM_TEST_META_RACE_FILE"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/fakebin/git"
+
+  set +e
+  FM_TEST_META_RACE_MARKER="$dir/meta-raced" FM_TEST_META_RACE_WORKTREE="$other" \
+    FM_TEST_META_RACE_FILE="$dir/home/state/task-a.meta" \
+    FM_TEST_META_RACE_TMP="$dir/home/state/task-a.meta.raced" FM_TEST_REAL_GIT="$REAL_GIT" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ -e "$dir/meta-raced" ] || fail "delivery metadata race did not replace the worktree during remote proof"
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted metadata that changed after remote proof"
+  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+    "changed delivery metadata was not re-probed against the live remote"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "delivery metadata race published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "delivery metadata race recorded PR metadata"
+  pass "PR delivery re-probes when task metadata changes outside the lock"
 }
 
 test_delivery_acceptance_rejects_local_upstream() {
@@ -2374,6 +2511,9 @@ test_delivery_acceptance_requires_live_remote
 test_legacy_ship_without_mode_requires_live_remote
 test_delivery_acceptance_uses_locked_metadata
 test_delivery_acceptance_allows_push_without_upstream
+test_delivery_probe_failures_are_bounded_and_actionable
+test_delivery_probe_rechecks_head_after_unlock
+test_delivery_probe_rechecks_metadata_after_unlock
 test_delivery_acceptance_rejects_local_upstream
 test_live_remote_proof_batches_missing_branch_fetches
 test_non_pushing_modes_skip_remote_delivery_proof

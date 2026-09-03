@@ -295,8 +295,9 @@ test_stale_submodule_pin_explains_itself() {
   assert_contains "$out" "submodule 'ui'" "refusal did not name the submodule"
   assert_contains "$out" "$SUBPIN1" "refusal did not report the pin the slot actually has"
   assert_contains "$out" "$SUBPIN2" "refusal did not report the pin the base records"
-  # No remedy is printed on purpose: this gate diagnoses and refuses the pooled
-  # slot but does not own repair or convergence.
+  # No remedy is printed on purpose: the containment check reads local refs only,
+  # so a stale remote-tracking ref can make an unpushed commit look contained, and
+  # a checkout command on that judgement could cost the operator a commit.
   assert_not_contains "$out" "submodule update --checkout" \
     "refusal printed a remedy command the containment check cannot stand behind"
   assert_not_contains "$out" "refusing to discard uncommitted work" \

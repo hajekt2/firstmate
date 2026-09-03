@@ -179,21 +179,10 @@ EOF
 
 fm_remote_delivery_proof_block() {
   cat <<'EOF'
-Before reporting a pushed branch as delivered, prove its upstream exists with `git rev-parse --abbrev-ref '@{u}'`.
-Then query that upstream's actual remote and require its live branch head to contain local `HEAD`:
-
-```sh
-branch=$(git branch --show-current) &&
-git rev-parse --abbrev-ref '@{u}' &&
-remote=$(git config --get "branch.$branch.remote") &&
-remote_ref=$(git config --get "branch.$branch.merge") &&
-[ "$remote" != . ] &&
-git fetch --quiet --no-tags "$remote" "$remote_ref" &&
-remote_head=$(git ls-remote --exit-code --heads "$remote" "$remote_ref" | awk 'NR == 1 { print $1 }') &&
-git merge-base --is-ancestor HEAD "$remote_head"
-```
-
-For the usual `origin` target, this asks `git ls-remote --exit-code --heads origin` rather than inspecting `origin/<branch>` locally.
+Before reporting a pushed branch as delivered, prove local `HEAD` is contained by a branch currently advertised by at least one configured remote.
+Do not require a configured upstream: `git push origin HEAD:refs/heads/<branch>` without `-u` is valid delivery.
+Query each remote with a live, non-interactive, time-bounded `git ls-remote --heads`, fetch advertised branch tips that are missing locally, and require an advertised tip to equal local `HEAD` or contain it according to `git merge-base --is-ancestor`.
+A timeout, authentication failure, unreachable remote, or exhausted probe budget means delivery is unproven, so stop and report the failure instead of claiming completion.
 A local remote-tracking ref such as `origin/<branch>` is not delivery evidence because it can be stale after the remote branch disappears.
 EOF
 }
