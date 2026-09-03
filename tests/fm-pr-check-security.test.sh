@@ -753,26 +753,31 @@ SH
 }
 
 test_delivery_acceptance_allows_push_without_upstream() {
-  local dir
-  dir=$(make_case delivery-without-upstream)
-  write_task_meta "$dir"
-  printf '%s\n' delivered > "$dir/wt/delivered.txt"
-  git -C "$dir/wt" add delivered.txt
-  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
-    commit -q -m "pushed task delivery"
-  git -C "$dir/wt" push -q origin HEAD:refs/heads/task-a
-  ! git -C "$dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
-    || fail "push-without-upstream fixture unexpectedly has an upstream"
-  [ "$(git -C "$dir/wt" ls-remote origin refs/heads/task-a | awk 'NR == 1 { print $1 }')" \
-      = "$(git -C "$dir/wt" rev-parse HEAD)" ] \
-    || fail "push-without-upstream fixture did not publish its task commit"
+  local dir transport
+  for transport in path file-url; do
+    dir=$(make_case "delivery-without-upstream-$transport")
+    write_task_meta "$dir"
+    if [ "$transport" = file-url ]; then
+      git -C "$dir/wt" remote set-url origin "file://127.0.0.1$dir/remote.git"
+    fi
+    printf '%s\n' delivered > "$dir/wt/delivered.txt"
+    git -C "$dir/wt" add delivered.txt
+    git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+      commit -q -m "pushed task delivery"
+    git -C "$dir/wt" push -q origin HEAD:refs/heads/task-a
+    ! git -C "$dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+      || fail "$transport push-without-upstream fixture unexpectedly has an upstream"
+    [ "$(git -C "$dir/wt" ls-remote origin refs/heads/task-a | awk 'NR == 1 { print $1 }')" \
+        = "$(git -C "$dir/wt" rev-parse HEAD)" ] \
+      || fail "$transport push-without-upstream fixture did not publish its task commit"
 
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "PR delivery rejected a live remote branch without an upstream"
-  assert_grep 'pr=https://github.com/o/r/pull/2' "$dir/home/state/task-a.meta" \
-    "accepted push without upstream did not record PR metadata"
-  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
-    || fail "accepted push without upstream did not publish its poll"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/stdout" 2> "$dir/stderr" \
+      || fail "PR delivery rejected a $transport live remote branch without an upstream"
+    assert_grep 'pr=https://github.com/o/r/pull/2' "$dir/home/state/task-a.meta" \
+      "$transport push without upstream did not record PR metadata"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "$transport push without upstream did not publish its poll"
+  done
   pass "PR delivery accepts a live remote branch without an upstream"
 }
 
@@ -983,15 +988,20 @@ test_delivery_acceptance_rejects_local_upstream() {
 
 test_delivery_acceptance_rejects_self_referential_remote() {
   local dir kind remote_url rc
-  for kind in dot file-localhost linked-worktree; do
+  for kind in dot file-localhost file-loopback linked-worktree file-authority-linked; do
     dir=$(make_case "delivery-self-remote-$kind")
     write_task_meta "$dir"
     case "$kind" in
       dot) remote_url=. ;;
       file-localhost) remote_url="file://localhost$dir/wt/.git" ;;
+      file-loopback) remote_url="file://127.0.0.1$dir/wt/.git" ;;
       linked-worktree)
         git -C "$dir/wt" worktree add -q --detach "$dir/sibling" HEAD
         remote_url="$dir/sibling"
+        ;;
+      file-authority-linked)
+        git -C "$dir/wt" worktree add -q --detach "$dir/sibling" HEAD
+        remote_url="file://arbitrary.invalid$dir/sibling"
         ;;
     esac
     git -C "$dir/wt" remote remove origin

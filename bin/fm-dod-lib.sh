@@ -179,7 +179,7 @@ EOF
 
 fm_remote_delivery_proof_block() {
   cat <<'EOF'
-Before reporting a pushed branch as delivered, prove local `HEAD` is contained by a branch currently advertised by at least one configured remote.
+Before reporting a pushed branch as delivered, prove the work is preserved somewhere independent of this working copy: local `HEAD` must be contained by a branch currently advertised by at least one configured remote, and a remote that resolves to this repository's Git common directory does not count.
 Do not require a configured upstream: `git push origin HEAD:refs/heads/<branch>` without `-u` is valid delivery.
 Query each remote with a live, non-interactive, time-bounded `git ls-remote --heads`, fetch advertised branch tips that are missing locally, and require an advertised tip to equal local `HEAD` or contain it according to `git merge-base --is-ancestor`.
 A timeout, authentication failure, unreachable remote, or exhausted probe budget means delivery is unproven, so stop and report the failure instead of claiming completion.
@@ -240,7 +240,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), prove the pushed branch is live on its upstream remote as follows.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run the remote delivery proof below.
 EOF
       fm_remote_delivery_proof_block
       cat <<'EOF'

@@ -109,9 +109,12 @@ fm_git_live_remote_common_dir() {  # <repo> <deadline> <operation-timeout>
 fm_git_live_remote_local_common_dir() {  # <repo-real> <url> <deadline> <operation-timeout>
   local repo_real=$1 url=$2 deadline=$3 operation_timeout=$4 path
   case "$url" in
-    file://localhost/*) path=/${url#file://localhost/} ;;
-    file:///*) path=${url#file://} ;;
-    file://*|*://*|*:*|'') return "$FM_GIT_LIVE_REMOTE_NON_LOCAL" ;;
+    file://*/*)
+      path=${url#file://}
+      path=/${path#*/}
+      ;;
+    file://*) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+    *://*|*:*|'') return "$FM_GIT_LIVE_REMOTE_NON_LOCAL" ;;
     /*) path=$url ;;
     *) path="$repo_real/$url" ;;
   esac

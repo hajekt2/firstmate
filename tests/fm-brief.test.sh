@@ -231,6 +231,10 @@ test_remote_delivery_proof_is_required_only_for_pushed_modes() {
     brief="$home/data/$id/brief.md"
     assert_no_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
       "$mode brief incorrectly requires a configured upstream"
+    assert_grep 'preserved somewhere independent of this working copy' "$brief" \
+      "$mode brief does not require delivery independent of the working repository"
+    assert_grep "remote that resolves to this repository's Git common directory does not count" "$brief" \
+      "$mode brief permits its working repository to prove its own delivery"
     assert_grep 'without `-u` is valid delivery' "$brief" \
       "$mode brief does not permit a push without upstream configuration"
     assert_grep 'each remote with a live, non-interactive, time-bounded `git ls-remote --heads`' "$brief" \
