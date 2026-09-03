@@ -5,12 +5,14 @@
 # locally are fetched together before checking ancestry.
 #
 # Public functions:
-#   fm_git_live_remote_heads <repo>
+#   fm_git_live_remote_deadline
+#     Print one absolute deadline from the configured overall probe budget.
+#   fm_git_live_remote_heads <repo> [deadline]
 #     Print the commit IDs advertised by every configured remote branch after
 #     fetching any advertised tip object that is not present locally.
-#   fm_git_commit_is_in_live_remote_heads <repo> <commit> <heads>
+#   fm_git_commit_is_in_live_remote_heads <repo> <commit> <heads> [deadline]
 #     True when commit is contained by a captured live-remote head set.
-#   fm_git_commit_is_on_live_remote <repo> <commit>
+#   fm_git_commit_is_on_live_remote <repo> <commit> [deadline]
 #     True when the commit is contained by any branch currently advertised by
 #     any configured remote.
 
@@ -23,12 +25,29 @@ FM_GIT_LIVE_REMOTE_NOT_FOUND=1
 FM_GIT_LIVE_REMOTE_TIMEOUT=2
 FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED=3
 FM_GIT_LIVE_REMOTE_PROBE_FAILED=4
+FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED=125
 
-fm_git_live_remote_run() {  # <deadline> <operation-timeout> <git-args...>
+fm_git_live_remote_deadline() {
+  local budget=${FM_GIT_LIVE_REMOTE_BUDGET_SECS:-45}
+  case "$budget" in
+    ''|*[!0-9]*|0) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
+  printf '%s\n' "$((SECONDS + budget))"
+}
+
+fm_git_live_remote_operation_timeout() {
+  local operation_timeout=${FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS:-15}
+  case "$operation_timeout" in
+    ''|*[!0-9]*|0) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
+  printf '%s\n' "$operation_timeout"
+}
+
+fm_git_live_remote_run_raw() {  # <deadline> <operation-timeout> <git-args...>
   local deadline=$1 operation_timeout=$2 remaining bound budget_limited=0 rc=0
   shift 2
   remaining=$((deadline - SECONDS))
-  [ "$remaining" -gt 0 ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
+  [ "$remaining" -gt 0 ] || return "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED"
   bound=$operation_timeout
   if [ "$remaining" -lt "$bound" ]; then
     bound=$remaining
@@ -43,23 +62,103 @@ fm_git_live_remote_run() {  # <deadline> <operation-timeout> <git-args...>
     GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes" \
     git "$@" </dev/null || rc=$?
   if [ "$rc" -eq 124 ]; then
-    [ "$budget_limited" -eq 0 ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
-    return "$FM_GIT_LIVE_REMOTE_TIMEOUT"
+    [ "$budget_limited" -eq 0 ] || return "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED"
   fi
-  [ "$rc" -eq 0 ] || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  return "$rc"
 }
 
-fm_git_live_remote_heads() {  # <repo>
-  local repo=$1 remote heads line remote_head remote_ref rc status=0
-  local operation_timeout=${FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS:-15}
-  local budget=${FM_GIT_LIVE_REMOTE_BUDGET_SECS:-45} deadline
-  local -a missing_refs
-  case "$operation_timeout:$budget" in
-    *[!0-9:]*|0:*|*:0) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+fm_git_live_remote_run() {  # <deadline> <operation-timeout> <git-args...>
+  local rc=0
+  fm_git_live_remote_run_raw "$@" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    124) return "$FM_GIT_LIVE_REMOTE_TIMEOUT" ;;
+    "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
   esac
-  deadline=$((SECONDS + budget))
+}
+
+fm_git_live_remote_note_status() {  # <current> <new>
+  local current=$1 new=$2
+  case "$new:$current" in
+    "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED":*) printf '%s\n' "$new" ;;
+    "$FM_GIT_LIVE_REMOTE_TIMEOUT":"$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED") printf '%s\n' "$current" ;;
+    "$FM_GIT_LIVE_REMOTE_TIMEOUT":*) printf '%s\n' "$new" ;;
+    "$FM_GIT_LIVE_REMOTE_PROBE_FAILED":0) printf '%s\n' "$new" ;;
+    *) printf '%s\n' "$current" ;;
+  esac
+}
+
+fm_git_live_remote_url_is_self_referential() {  # <repo-real> <git-dir-real> <common-dir-real> <url>
+  local repo_real=$1 git_dir_real=$2 common_dir_real=$3 url=$4 path real
+  case "$url" in
+    file://*) path=${url#file://} ;;
+    *://*|*:*|'') return 1 ;;
+    /*) path=$url ;;
+    *) path="$repo_real/$url" ;;
+  esac
+  real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+  [ "$real" = "$repo_real" ] || [ "$real" = "$git_dir_real" ] || [ "$real" = "$common_dir_real" ]
+}
+
+fm_git_live_remote_heads() {  # <repo> [deadline]
+  local repo=$1 deadline=${2:-} operation_timeout remotes remote remote_url heads line
+  local remote_head remote_ref rc status=0 repo_real git_dir common_dir scan_exhausted=0
+  local -a missing_refs
+  operation_timeout=$(fm_git_live_remote_operation_timeout) || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  case "$deadline" in ''|*[!0-9]*) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;; esac
+  [ "$SECONDS" -lt "$deadline" ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
+  repo_real=$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd -P) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  git_dir=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+    -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || rc=$?
+  case "${rc:-0}" in
+    0) ;;
+    124) return "$FM_GIT_LIVE_REMOTE_TIMEOUT" ;;
+    "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
+  git_dir=$(CDPATH='' cd -- "$git_dir" 2>/dev/null && pwd -P) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  rc=0
+  common_dir=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+    -C "$repo" rev-parse --git-common-dir 2>/dev/null) || rc=$?
+  case "$rc" in
+    0) ;;
+    124) return "$FM_GIT_LIVE_REMOTE_TIMEOUT" ;;
+    "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
+  case "$common_dir" in /*) ;; *) common_dir="$repo_real/$common_dir" ;; esac
+  common_dir=$(CDPATH='' cd -- "$common_dir" 2>/dev/null && pwd -P) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  rc=0
+  remotes=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+    -C "$repo" remote 2>/dev/null) || rc=$?
+  case "$rc" in
+    0) ;;
+    124) return "$FM_GIT_LIVE_REMOTE_TIMEOUT" ;;
+    "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
+    rc=0
+    remote_url=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+      -C "$repo" remote get-url "$remote" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) ;;
+      124) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT"); continue ;;
+      "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED; break ;;
+      *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"); continue ;;
+    esac
+    if fm_git_live_remote_url_is_self_referential \
+      "$repo_real" "$git_dir" "$common_dir" "$remote_url"; then
+      status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED")
+      continue
+    fi
     if heads=$(fm_git_live_remote_run "$deadline" "$operation_timeout" \
       -C "$repo" ls-remote --heads "$remote" 2>/dev/null); then
       :
@@ -78,13 +177,26 @@ fm_git_live_remote_heads() {  # <repo>
       remote_head=${line%%$'\t'*}
       remote_ref=${line#*$'\t'}
       [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
-      if ! git -C "$repo" cat-file -e "$remote_head^{commit}" 2>/dev/null; then
-        missing_refs+=("$remote_ref")
-      fi
+      rc=0
+      fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+        -C "$repo" cat-file -e "$remote_head^{commit}" >/dev/null 2>&1 || rc=$?
+      case "$rc" in
+        0) ;;
+        124)
+          status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT")
+          missing_refs+=("$remote_ref")
+          ;;
+        "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED")
+          status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
+          scan_exhausted=1
+          break
+          ;;
+        *) missing_refs+=("$remote_ref") ;;
+      esac
     done <<EOF
 $heads
 EOF
-    if [ "${#missing_refs[@]}" -gt 0 ]; then
+    if [ "$scan_exhausted" -eq 0 ] && [ "${#missing_refs[@]}" -gt 0 ]; then
       if fm_git_live_remote_run "$deadline" "$operation_timeout" \
         -C "$repo" fetch --quiet --no-tags "$remote" "${missing_refs[@]}" >/dev/null 2>&1; then
         :
@@ -99,6 +211,10 @@ EOF
     fi
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
+        break
+      fi
       remote_head=${line%%$'\t'*}
       remote_ref=${line#*$'\t'}
       [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
@@ -107,33 +223,61 @@ EOF
 $heads
 EOF
     [ "$status" -ne "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ] || break
-  done < <(git -C "$repo" remote 2>/dev/null)
+  done <<EOF
+$remotes
+EOF
   return "$status"
 }
 
-fm_git_commit_is_in_live_remote_heads() {  # <repo> <commit> <heads>
-  local repo=$1 commit=$2 heads=$3 remote_head
+fm_git_commit_is_in_live_remote_heads() {  # <repo> <commit> <heads> [deadline]
+  local repo=$1 commit=$2 heads=$3 deadline=${4:-} operation_timeout remote_head rc status=0
+  operation_timeout=$(fm_git_live_remote_operation_timeout) || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  case "$deadline" in ''|*[!0-9]*) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;; esac
   while IFS= read -r remote_head; do
     [ -n "$remote_head" ] || continue
-    if [ "$commit" = "$remote_head" ] \
-      || { git -C "$repo" cat-file -e "$remote_head^{commit}" 2>/dev/null \
-        && git -C "$repo" merge-base --is-ancestor "$commit" "$remote_head" 2>/dev/null; }; then
-      return 0
-    fi
+    [ "$SECONDS" -lt "$deadline" ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
+    [ "$commit" != "$remote_head" ] || return 0
+    rc=0
+    fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+      -C "$repo" cat-file -e "$remote_head^{commit}" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0)
+        rc=0
+        fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+          -C "$repo" merge-base --is-ancestor "$commit" "$remote_head" >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+          0) return 0 ;;
+          1) ;;
+          124) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT") ;;
+          "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+          *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED") ;;
+        esac
+        ;;
+      124) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT") ;;
+      "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
+      *) ;;
+    esac
   done <<EOF
 $heads
 EOF
-  return 1
+  [ "$status" -eq 0 ] || return "$status"
+  return "$FM_GIT_LIVE_REMOTE_NOT_FOUND"
 }
 
-fm_git_commit_is_on_live_remote() {  # <repo> <commit>
-  local repo=$1 commit=$2 heads snapshot_rc=0
-  if heads=$(fm_git_live_remote_heads "$repo"); then
+fm_git_commit_is_on_live_remote() {  # <repo> <commit> [deadline]
+  local repo=$1 commit=$2 deadline=${3:-} heads snapshot_rc=0 contain_rc=0 status
+  [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  if heads=$(fm_git_live_remote_heads "$repo" "$deadline"); then
     :
   else
     snapshot_rc=$?
   fi
-  fm_git_commit_is_in_live_remote_heads "$repo" "$commit" "$heads" && return 0
-  [ "$snapshot_rc" -eq 0 ] || return "$snapshot_rc"
-  return "$FM_GIT_LIVE_REMOTE_NOT_FOUND"
+  fm_git_commit_is_in_live_remote_heads "$repo" "$commit" "$heads" "$deadline" || contain_rc=$?
+  [ "$contain_rc" -ne 0 ] || return 0
+  status=$(fm_git_live_remote_note_status "$snapshot_rc" "$contain_rc")
+  [ "$status" -ne 0 ] || status=$FM_GIT_LIVE_REMOTE_NOT_FOUND
+  return "$status"
 }

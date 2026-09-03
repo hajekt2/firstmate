@@ -77,6 +77,7 @@ META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
 PR_KIND=
+PR_RAW_KIND=
 PR_MODE=
 PR_DELIVERY_MODE=
 WT=
@@ -95,7 +96,8 @@ pr_check_read_delivery_metadata() {
   META_DEVICE=$(fm_pr_file_device "$META") || return 1
   STATE_DEVICE=$(fm_pr_file_device "$STATE") || return 1
   [ "$META_DEVICE" = "$STATE_DEVICE" ] || return 1
-  PR_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+  PR_RAW_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+  PR_KIND=${PR_RAW_KIND:-ship}
   PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   PR_DELIVERY_MODE=$PR_MODE
@@ -129,12 +131,14 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+PROBE_DEADLINE=
 while :; do
   fm_lock_acquire_wait "$META_LOCK"
   META_LOCK_HELD=1
   pr_check_read_delivery_metadata \
     || { echo "error: task metadata is unavailable" >&2; exit 1; }
   PROBE_KIND=$PR_KIND
+  PROBE_RAW_KIND=$PR_RAW_KIND
   PROBE_MODE=$PR_MODE
   PROBE_DELIVERY_MODE=$PR_DELIVERY_MODE
   PROBE_WT=$WT
@@ -148,8 +152,14 @@ while :; do
         echo "error: refusing PR delivery because task worktree HEAD is unavailable" >&2
         exit 1
       fi
+      if [ -z "$PROBE_DEADLINE" ]; then
+        PROBE_DEADLINE=$(fm_git_live_remote_deadline) || {
+          pr_check_delivery_proof_error "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+          exit 1
+        }
+      fi
       PROOF_RC=0
-      fm_git_commit_is_on_live_remote "$PROBE_WT" "$PROBE_HEAD" || PROOF_RC=$?
+      fm_git_commit_is_on_live_remote "$PROBE_WT" "$PROBE_HEAD" "$PROBE_DEADLINE" || PROOF_RC=$?
       if [ "$PROOF_RC" -ne 0 ]; then
         pr_check_delivery_proof_error "$PROOF_RC"
         exit 1
@@ -162,7 +172,8 @@ while :; do
   pr_check_read_delivery_metadata \
     || { echo "error: task metadata is unavailable" >&2; exit 1; }
   DELIVERY_STATE_STABLE=0
-  if [ "$PR_KIND" = "$PROBE_KIND" ] && [ "$PR_MODE" = "$PROBE_MODE" ] \
+  if [ "$PR_RAW_KIND" = "$PROBE_RAW_KIND" ] && [ "$PR_KIND" = "$PROBE_KIND" ] \
+    && [ "$PR_MODE" = "$PROBE_MODE" ] \
     && [ "$PR_DELIVERY_MODE" = "$PROBE_DELIVERY_MODE" ] && [ "$WT" = "$PROBE_WT" ]; then
     case "$PR_KIND:$PR_DELIVERY_MODE" in
       ship:no-mistakes|ship:direct-PR)

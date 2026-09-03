@@ -667,6 +667,31 @@ test_legacy_ship_without_mode_requires_live_remote() {
   pass "legacy ship records default to no-mistakes delivery proof"
 }
 
+test_legacy_task_without_kind_requires_live_remote() {
+  local dir rc tmp
+  dir=$(make_case legacy-delivery-without-kind)
+  write_task_meta "$dir"
+  tmp="$dir/home/state/task-a.meta.tmp"
+  grep -v '^kind=' "$dir/home/state/task-a.meta" > "$tmp"
+  mv "$tmp" "$dir/home/state/task-a.meta"
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "legacy local delivery without kind"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "legacy task without kind bypassed remote delivery proof"
+  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+    "legacy task without kind did not default to ship delivery proof"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "legacy unpushed task published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "legacy unpushed task recorded PR metadata"
+  pass "legacy task records default an absent kind to ship"
+}
+
 test_delivery_acceptance_uses_locked_metadata() {
   local dir lock holder check_pid rc i tmp
   dir=$(make_case delivery-promotion-race)
@@ -759,9 +784,11 @@ test_delivery_probe_failures_are_bounded_and_actionable() {
     cat > "$dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 remote_operation=
+local_operation=
 for arg in "$@"; do
   case "$arg" in
     ls-remote|fetch) remote_operation=$arg; break ;;
+    cat-file) local_operation=$arg ;;
   esac
 done
 if [ -n "$remote_operation" ]; then
@@ -773,11 +800,14 @@ if [ -n "$remote_operation" ]; then
     failure) exit 93 ;;
   esac
 fi
+if [ "$local_operation" = cat-file ] && [ "$FM_TEST_REMOTE_GIT_BEHAVIOR" = local-budget ]; then
+  sleep 5
+fi
 exec "$FM_TEST_REAL_GIT" "$@"
 SH
     chmod +x "$dir/fakebin/git"
     set +e
-    if [ "$behavior" = budget ]; then
+    if [ "$behavior" = budget ] || [ "$behavior" = local-budget ]; then
       FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=5 FM_GIT_LIVE_REMOTE_BUDGET_SECS=1 \
         FM_TEST_REMOTE_GIT_BEHAVIOR=$behavior FM_TEST_REAL_GIT="$REAL_GIT" \
         run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr"
@@ -796,6 +826,7 @@ SH
 timeout|probe timed out; check remote connectivity and authentication, then retry
 budget|probe exhausted its overall budget; remove or repair unreachable remotes, then retry
 failure|non-interactive live-remote probe failed; authenticate or repair the remote, then retry
+local-budget|probe exhausted its overall budget; remove or repair unreachable remotes, then retry
 EOF
   pass "PR delivery bounds remote probes and explains indeterminate results"
 }
@@ -880,6 +911,52 @@ SH
   pass "PR delivery re-probes when task metadata changes outside the lock"
 }
 
+test_delivery_probe_budget_spans_retries() {
+  local dir rc attempts
+  dir=$(make_case delivery-retry-budget)
+  write_task_meta "$dir"
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_ls_remote=0
+for arg in "$@"; do
+  [ "$arg" = ls-remote ] && is_ls_remote=1
+done
+if [ "$is_ls_remote" -eq 1 ]; then
+  attempts=$(cat "$FM_TEST_RETRY_COUNT" 2>/dev/null || printf '0')
+  attempts=$((attempts + 1))
+  printf '%s\n' "$attempts" > "$FM_TEST_RETRY_COUNT"
+  head=$("$FM_TEST_REAL_GIT" -C "$FM_TEST_RETRY_WORKTREE" rev-parse HEAD)
+  if [ "$attempts" -le 3 ]; then
+    sleep 1
+    "$FM_TEST_REAL_GIT" -C "$FM_TEST_RETRY_WORKTREE" \
+      -c user.name=fmtest -c user.email=fmtest@example.invalid \
+      commit -q --allow-empty -m "raced head $attempts"
+  fi
+  printf '%s\trefs/heads/task-a\n' "$head"
+  exit 0
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/fakebin/git"
+
+  set +e
+  FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=5 FM_GIT_LIVE_REMOTE_BUDGET_SECS=2 \
+    FM_TEST_RETRY_COUNT="$dir/retry-count" FM_TEST_RETRY_WORKTREE="$dir/wt" \
+    FM_TEST_REAL_GIT="$REAL_GIT" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/11 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  attempts=$(cat "$dir/retry-count" 2>/dev/null || printf '0')
+  [ "$attempts" -ge 2 ] || fail "delivery retry fixture did not repeat the live-remote proof"
+  [ "$rc" -ne 0 ] || fail "PR delivery reset its overall probe budget across HEAD changes"
+  assert_grep "probe exhausted its overall budget" "$dir/stderr" \
+    "delivery retries did not fail closed at the shared deadline"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "exhausted delivery retries published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "exhausted delivery retries recorded PR metadata"
+  pass "PR delivery keeps one probe budget across acceptance retries"
+}
+
 test_delivery_acceptance_rejects_local_upstream() {
   local dir rc
   dir=$(make_case delivery-local-upstream)
@@ -902,6 +979,32 @@ test_delivery_acceptance_rejects_local_upstream() {
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "local upstream published a PR poll"
   assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "local upstream recorded PR metadata"
   pass "PR delivery rejects an upstream whose remote is dot"
+}
+
+test_delivery_acceptance_rejects_self_referential_remote() {
+  local dir rc
+  dir=$(make_case delivery-self-remote)
+  write_task_meta "$dir"
+  git -C "$dir/wt" remote remove origin
+  git -C "$dir/wt" remote add local .
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "self-referential delivery"
+  [ "$(git -C "$dir/wt" remote get-url local)" = . ] \
+    || fail "self-referential remote fixture did not use dot"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/12 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted a self-referential remote"
+  assert_grep "non-interactive live-remote probe failed" "$dir/stderr" \
+    "self-referential remote refusal did not identify the failed proof"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "self-referential remote published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "self-referential remote recorded PR metadata"
+  pass "PR delivery rejects a remote that points at its own worktree"
 }
 
 test_live_remote_proof_batches_missing_branch_fetches() {
@@ -2509,12 +2612,15 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_delivery_acceptance_requires_live_remote
 test_legacy_ship_without_mode_requires_live_remote
+test_legacy_task_without_kind_requires_live_remote
 test_delivery_acceptance_uses_locked_metadata
 test_delivery_acceptance_allows_push_without_upstream
 test_delivery_probe_failures_are_bounded_and_actionable
 test_delivery_probe_rechecks_head_after_unlock
 test_delivery_probe_rechecks_metadata_after_unlock
+test_delivery_probe_budget_spans_retries
 test_delivery_acceptance_rejects_local_upstream
+test_delivery_acceptance_rejects_self_referential_remote
 test_live_remote_proof_batches_missing_branch_fetches
 test_non_pushing_modes_skip_remote_delivery_proof
 test_valid_recording_and_merge_derivation
