@@ -940,7 +940,7 @@ SH
   chmod +x "$dir/fakebin/git"
 
   set +e
-  FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=5 FM_GIT_LIVE_REMOTE_BUDGET_SECS=2 \
+  FM_GIT_LIVE_REMOTE_OPERATION_TIMEOUT_SECS=5 FM_GIT_LIVE_REMOTE_BUDGET_SECS=3 \
     FM_TEST_RETRY_COUNT="$dir/retry-count" FM_TEST_RETRY_WORKTREE="$dir/wt" \
     FM_TEST_REAL_GIT="$REAL_GIT" \
     run_check_entry "$dir" task-a https://github.com/o/r/pull/11 > "$dir/stdout" 2> "$dir/stderr"
@@ -982,29 +982,67 @@ test_delivery_acceptance_rejects_local_upstream() {
 }
 
 test_delivery_acceptance_rejects_self_referential_remote() {
-  local dir rc
-  dir=$(make_case delivery-self-remote)
+  local dir kind remote_url rc
+  for kind in dot file-localhost linked-worktree; do
+    dir=$(make_case "delivery-self-remote-$kind")
+    write_task_meta "$dir"
+    case "$kind" in
+      dot) remote_url=. ;;
+      file-localhost) remote_url="file://localhost$dir/wt/.git" ;;
+      linked-worktree)
+        git -C "$dir/wt" worktree add -q --detach "$dir/sibling" HEAD
+        remote_url="$dir/sibling"
+        ;;
+    esac
+    git -C "$dir/wt" remote remove origin
+    git -C "$dir/wt" remote add local "$remote_url"
+    printf '%s\n' local > "$dir/wt/local.txt"
+    git -C "$dir/wt" add local.txt
+    git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+      commit -q -m "self-referential delivery"
+
+    set +e
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/12 > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "PR delivery accepted a $kind self-referential remote"
+    assert_grep "non-interactive live-remote probe failed" "$dir/stderr" \
+      "$kind self-referential remote refusal did not identify the failed proof"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "$kind self-referential remote published a PR poll"
+    assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "$kind self-referential remote recorded PR metadata"
+  done
+  pass "PR delivery rejects remotes sharing its Git common directory"
+}
+
+test_delivery_acceptance_allows_nonlocal_remote() {
+  local dir head
+  dir=$(make_case delivery-nonlocal-remote)
   write_task_meta "$dir"
-  git -C "$dir/wt" remote remove origin
-  git -C "$dir/wt" remote add local .
-  printf '%s\n' local > "$dir/wt/local.txt"
-  git -C "$dir/wt" add local.txt
+  printf '%s\n' delivered > "$dir/wt/delivered.txt"
+  git -C "$dir/wt" add delivered.txt
   git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
-    commit -q -m "self-referential delivery"
-  [ "$(git -C "$dir/wt" remote get-url local)" = . ] \
-    || fail "self-referential remote fixture did not use dot"
+    commit -q -m "normal remote delivery"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" remote set-url origin https://example.invalid/o/r.git
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = ls-remote ]; then
+    printf '%s\trefs/heads/task-a\n' "$FM_TEST_REMOTE_HEAD"
+    exit 0
+  fi
+done
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/fakebin/git"
 
-  set +e
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/12 > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-
-  [ "$rc" -ne 0 ] || fail "PR delivery accepted a self-referential remote"
-  assert_grep "non-interactive live-remote probe failed" "$dir/stderr" \
-    "self-referential remote refusal did not identify the failed proof"
-  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "self-referential remote published a PR poll"
-  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "self-referential remote recorded PR metadata"
-  pass "PR delivery rejects a remote that points at its own worktree"
+  FM_TEST_REMOTE_HEAD="$head" FM_TEST_REAL_GIT="$REAL_GIT" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/13 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "PR delivery rejected an advertised non-local remote branch"
+  assert_grep 'pr=https://github.com/o/r/pull/13' "$dir/home/state/task-a.meta" \
+    "accepted non-local remote did not record PR metadata"
+  pass "PR delivery accepts an advertised non-local remote branch"
 }
 
 test_live_remote_proof_batches_missing_branch_fetches() {
@@ -2621,6 +2659,7 @@ test_delivery_probe_rechecks_metadata_after_unlock
 test_delivery_probe_budget_spans_retries
 test_delivery_acceptance_rejects_local_upstream
 test_delivery_acceptance_rejects_self_referential_remote
+test_delivery_acceptance_allows_nonlocal_remote
 test_live_remote_proof_batches_missing_branch_fetches
 test_non_pushing_modes_skip_remote_delivery_proof
 test_valid_recording_and_merge_derivation

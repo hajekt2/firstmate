@@ -26,6 +26,7 @@ FM_GIT_LIVE_REMOTE_TIMEOUT=2
 FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED=3
 FM_GIT_LIVE_REMOTE_PROBE_FAILED=4
 FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED=125
+FM_GIT_LIVE_REMOTE_NON_LOCAL=126
 
 fm_git_live_remote_deadline() {
   local budget=${FM_GIT_LIVE_REMOTE_BUDGET_SECS:-45}
@@ -89,40 +90,8 @@ fm_git_live_remote_note_status() {  # <current> <new>
   esac
 }
 
-fm_git_live_remote_url_is_self_referential() {  # <repo-real> <git-dir-real> <common-dir-real> <url>
-  local repo_real=$1 git_dir_real=$2 common_dir_real=$3 url=$4 path real
-  case "$url" in
-    file://*) path=${url#file://} ;;
-    *://*|*:*|'') return 1 ;;
-    /*) path=$url ;;
-    *) path="$repo_real/$url" ;;
-  esac
-  real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
-  [ "$real" = "$repo_real" ] || [ "$real" = "$git_dir_real" ] || [ "$real" = "$common_dir_real" ]
-}
-
-fm_git_live_remote_heads() {  # <repo> [deadline]
-  local repo=$1 deadline=${2:-} operation_timeout remotes remote remote_url heads line
-  local remote_head remote_ref rc status=0 repo_real git_dir common_dir scan_exhausted=0
-  local -a missing_refs
-  operation_timeout=$(fm_git_live_remote_operation_timeout) || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
-  [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
-    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
-  case "$deadline" in ''|*[!0-9]*) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;; esac
-  [ "$SECONDS" -lt "$deadline" ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
-  repo_real=$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd -P) \
-    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
-  git_dir=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
-    -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || rc=$?
-  case "${rc:-0}" in
-    0) ;;
-    124) return "$FM_GIT_LIVE_REMOTE_TIMEOUT" ;;
-    "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
-    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
-  esac
-  git_dir=$(CDPATH='' cd -- "$git_dir" 2>/dev/null && pwd -P) \
-    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
-  rc=0
+fm_git_live_remote_common_dir() {  # <repo> <deadline> <operation-timeout>
+  local repo=$1 deadline=$2 operation_timeout=$3 common_dir rc=0
   common_dir=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
     -C "$repo" rev-parse --git-common-dir 2>/dev/null) || rc=$?
   case "$rc" in
@@ -131,9 +100,42 @@ fm_git_live_remote_heads() {  # <repo> [deadline]
     "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ;;
     *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
   esac
-  case "$common_dir" in /*) ;; *) common_dir="$repo_real/$common_dir" ;; esac
+  case "$common_dir" in /*) ;; *) common_dir="$repo/$common_dir" ;; esac
   common_dir=$(CDPATH='' cd -- "$common_dir" 2>/dev/null && pwd -P) \
     || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  printf '%s\n' "$common_dir"
+}
+
+fm_git_live_remote_local_common_dir() {  # <repo-real> <url> <deadline> <operation-timeout>
+  local repo_real=$1 url=$2 deadline=$3 operation_timeout=$4 path
+  case "$url" in
+    file://localhost/*) path=/${url#file://localhost/} ;;
+    file:///*) path=${url#file://} ;;
+    file://*|*://*|*:*|'') return "$FM_GIT_LIVE_REMOTE_NON_LOCAL" ;;
+    /*) path=$url ;;
+    *) path="$repo_real/$url" ;;
+  esac
+  fm_git_live_remote_common_dir "$path" "$deadline" "$operation_timeout"
+}
+
+fm_git_live_remote_heads() {  # <repo> [deadline]
+  local repo=$1 deadline=${2:-} operation_timeout remotes remote remote_url heads line
+  local remote_head remote_ref rc status=0 repo_real common_dir remote_common_dir scan_exhausted=0
+  local -a missing_refs
+  operation_timeout=$(fm_git_live_remote_operation_timeout) || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  case "$deadline" in ''|*[!0-9]*) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;; esac
+  [ "$SECONDS" -lt "$deadline" ] || return "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"
+  repo_real=$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd -P) \
+    || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
+  rc=0
+  common_dir=$(fm_git_live_remote_common_dir "$repo_real" "$deadline" "$operation_timeout") || rc=$?
+  case "$rc" in
+    0) ;;
+    "$FM_GIT_LIVE_REMOTE_TIMEOUT"|"$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"|"$FM_GIT_LIVE_REMOTE_PROBE_FAILED") return "$rc" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
   rc=0
   remotes=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
     -C "$repo" remote 2>/dev/null) || rc=$?
@@ -154,11 +156,21 @@ fm_git_live_remote_heads() {  # <repo> [deadline]
       "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED; break ;;
       *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"); continue ;;
     esac
-    if fm_git_live_remote_url_is_self_referential \
-      "$repo_real" "$git_dir" "$common_dir" "$remote_url"; then
-      status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED")
-      continue
-    fi
+    rc=0
+    remote_common_dir=$(fm_git_live_remote_local_common_dir \
+      "$repo_real" "$remote_url" "$deadline" "$operation_timeout") || rc=$?
+    case "$rc" in
+      0)
+        if [ "$remote_common_dir" = "$common_dir" ]; then
+          status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED")
+          continue
+        fi
+        ;;
+      "$FM_GIT_LIVE_REMOTE_NON_LOCAL") ;;
+      "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED") status=$rc; break ;;
+      "$FM_GIT_LIVE_REMOTE_TIMEOUT") status=$(fm_git_live_remote_note_status "$status" "$rc"); continue ;;
+      *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"); continue ;;
+    esac
     if heads=$(fm_git_live_remote_run "$deadline" "$operation_timeout" \
       -C "$repo" ls-remote --heads "$remote" 2>/dev/null); then
       :
