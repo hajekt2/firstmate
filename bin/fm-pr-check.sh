@@ -45,18 +45,6 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
-PR_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-case "$PR_KIND:$PR_MODE" in
-  ship:no-mistakes|ship:direct-PR)
-    if [ -z "$WT" ] || [ ! -d "$WT" ] || ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
-      echo "error: refusing PR delivery because worktree HEAD is not present on any live remote branch" >&2
-      exit 1
-    fi
-    ;;
-esac
-
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -85,14 +73,6 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
-fi
-
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
@@ -117,6 +97,28 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+PR_KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_DELIVERY_MODE=$PR_MODE
+if [ "$PR_KIND" = ship ] && [ -z "$PR_DELIVERY_MODE" ]; then
+  PR_DELIVERY_MODE=no-mistakes
+fi
+case "$PR_KIND:$PR_DELIVERY_MODE" in
+  ship:no-mistakes|ship:direct-PR)
+    if [ -z "$WT" ] || [ ! -d "$WT" ] || ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
+      echo "error: refusing PR delivery because worktree HEAD is not present on any live remote branch" >&2
+      exit 1
+    fi
+    ;;
+esac
+PR_HEAD=
+if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in

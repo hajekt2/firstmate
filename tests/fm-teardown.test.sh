@@ -297,6 +297,32 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
 }
 
+append_equivalent_patch_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  tmp="$case_dir/_equiv-next"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b "$branch" "origin/$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+  git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
+  git -C "$case_dir/project" fetch -q origin "$branch"
+  rm -rf "$tmp"
+  git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
+add_git_ls_remote_counter() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" ls-remote "*) printf '%s\n' "$*" >> "${FM_TEST_GIT_LS_REMOTE_LOG:?}" ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Override gh-axi so every call fails, simulating an API/network error.
 add_gh_axi_error() {
   local case_dir=$1
@@ -925,7 +951,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
+  local case_dir rc parent_head pr_head probe_count
   case_dir=$(make_case squash-replayed-patch)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
@@ -933,17 +959,24 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
   git -C "$case_dir/project" fetch -q origin fm/task-x1
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_commit_file "$case_dir" second.txt world "add second feature"
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  pr_head=$(append_equivalent_patch_on_origin_branch "$case_dir" pr-head second.txt world "add second feature")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_git_ls_remote_counter "$case_dir"
+  : > "$case_dir/ls-remote.log"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEST_GIT_LS_REMOTE_LOG="$case_dir/ls-remote.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
+  probe_count=$(wc -l < "$case_dir/ls-remote.log" | tr -d '[:space:]')
+  expect_code 2 "$probe_count" "squash-replayed-patch: teardown should advertise remotes once at safety entry and once for the complete patch comparison"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
@@ -972,21 +1005,27 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   case_dir=$(make_case pr-check-stale)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null \
+    || fail "pr-check-stale: pushed initial HEAD should register"
 
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   new_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
+  set +e
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "pr-check-stale: unpushed later HEAD should refuse re-registration"
 
   count=$(grep -c '^pr_head=' "$case_dir/state/task-x1.meta" || true)
   expect_code 1 "$count" "pr-check-stale: stale rerun should not append a second pr_head"
@@ -1009,6 +1048,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
@@ -1499,6 +1539,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
   channel="$case_dir/parent/state/mate-x.status"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
@@ -1519,6 +1560,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
   case_dir=$(make_case main-pr-ready)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
   add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \

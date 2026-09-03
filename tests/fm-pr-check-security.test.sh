@@ -643,6 +643,89 @@ test_delivery_acceptance_requires_live_remote() {
   pass "PR delivery refuses a supplied URL when HEAD is absent from live remotes"
 }
 
+test_legacy_ship_without_mode_requires_live_remote() {
+  local dir rc tmp
+  dir=$(make_case legacy-delivery-without-mode)
+  write_task_meta "$dir"
+  tmp="$dir/home/state/task-a.meta.tmp"
+  grep -v '^mode=' "$dir/home/state/task-a.meta" > "$tmp"
+  mv "$tmp" "$dir/home/state/task-a.meta"
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "legacy local delivery"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/5 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "legacy ship without mode bypassed remote delivery proof"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "legacy unpushed ship published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "legacy unpushed ship recorded PR metadata"
+  pass "legacy ship records default to no-mistakes delivery proof"
+}
+
+test_delivery_acceptance_uses_locked_metadata() {
+  local dir lock holder check_pid rc i tmp
+  dir=$(make_case delivery-promotion-race)
+  write_task_meta "$dir" task-a no-mistakes scout
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "promoted local delivery"
+  lock="$dir/home/state/.meta-task-a.lock"
+  cat > "$dir/fakebin/cp" <<SH
+#!/usr/bin/env bash
+"$REAL_CP" "\$@" || exit 1
+: > "$dir/poll-prepare.ready"
+while [ ! -e "$dir/poll-prepare.release" ]; do sleep 0.01; done
+SH
+  chmod +x "$dir/fakebin/cp"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock"
+    trap 'fm_lock_release "$lock"' EXIT
+    : > "$dir/meta-lock.ready"
+    while [ ! -e "$dir/meta-rewrite" ]; do sleep 0.01; done
+    tmp="$dir/home/state/task-a.meta.promoted"
+    grep -v -e '^kind=' -e '^mode=' "$dir/home/state/task-a.meta" > "$tmp"
+    printf '%s\n' 'kind=ship' 'mode=direct-PR' >> "$tmp"
+    mv "$tmp" "$dir/home/state/task-a.meta"
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/meta-lock.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$dir/meta-lock.ready" ] || fail "promotion race could not hold the metadata lock"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/6 > "$dir/stdout" 2> "$dir/stderr" &
+  check_pid=$!
+  i=0
+  while [ ! -e "$dir/poll-prepare.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/poll-prepare.ready" ]; then
+    : > "$dir/meta-rewrite"
+    : > "$dir/poll-prepare.release"
+    wait "$holder" 2>/dev/null || true
+    wait "$check_pid" 2>/dev/null || true
+    fail "promotion race did not reach pre-lock poll preparation"
+  fi
+  : > "$dir/meta-rewrite"
+  wait "$holder" || fail "promotion race could not publish ship metadata"
+  : > "$dir/poll-prepare.release"
+  set +e
+  wait "$check_pid"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted stale scout metadata after promotion"
+  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+    "locked ship metadata did not trigger remote delivery refusal"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "promotion race published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "promotion race recorded PR metadata"
+  pass "PR delivery decides promotion races from metadata read under lock"
+}
+
 test_delivery_acceptance_allows_push_without_upstream() {
   local dir
   dir=$(make_case delivery-without-upstream)
@@ -2226,6 +2309,8 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_delivery_acceptance_requires_live_remote
+test_legacy_ship_without_mode_requires_live_remote
+test_delivery_acceptance_uses_locked_metadata
 test_delivery_acceptance_allows_push_without_upstream
 test_delivery_acceptance_rejects_local_upstream
 test_non_pushing_modes_skip_remote_delivery_proof

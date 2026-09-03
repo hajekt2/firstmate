@@ -1085,7 +1085,7 @@ patch_id_for_commit() {
 }
 
 local_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id local_commits
+  local pr_head=$1 current base pr_patch_ids commit patch_id local_commits live_remote_heads
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
@@ -1099,9 +1099,10 @@ local_patches_are_in_pr_head() {
   [ -n "$pr_patch_ids" ] || return 1
   local_commits=$(git -C "$WT" log --format=%H "$base..$current" -- 2>/dev/null) || return 1
   [ -n "$local_commits" ] || return 1
+  live_remote_heads=$(fm_git_live_remote_heads "$WT") || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
-    fm_git_commit_is_on_live_remote "$WT" "$commit" && continue
+    fm_git_commit_is_in_live_remote_heads "$WT" "$commit" "$live_remote_heads" && continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
