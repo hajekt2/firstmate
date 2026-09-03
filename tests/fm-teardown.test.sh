@@ -3,7 +3,7 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means local HEAD is contained
-# by a live upstream branch queried from its remote,
+# by a branch advertised by any configured remote,
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
@@ -22,10 +22,10 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a live fork upstream branch       -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a live fork remote branch         -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on live origin upstream branch      -> ALLOW  (no regression)
+#   (d) no-mistakes + HEAD on live origin remote branch        -> ALLOW  (no regression)
 #   (e) no-mistakes + no upstream, no PR, content not default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -50,6 +50,8 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) pushed without upstream                               -> ALLOW
+#   (aa) local upstream only                                  -> REFUSE
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -339,6 +341,43 @@ if [ "${1:-}" = return ]; then
     exit 128
   fi
   exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+add_stale_lock_on_return_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ -n "$lock" ]; then
+    marker="${lock}.created-for-test"
+    if [ ! -e "$marker" ]; then
+      mkdir -p "$(dirname "$lock")"
+      : > "$lock"
+      touch -t 200001010000 "$lock"
+      : > "$marker"
+    fi
+    if [ -e "$lock" ]; then
+      echo "fatal: Unable to create '$lock': File exists." >&2
+      exit 128
+    fi
+  fi
 fi
 exit 0
 SH
@@ -713,6 +752,53 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+test_no_mistakes_pushed_without_upstream_allows() {
+  local case_dir rc remote_head
+  case_dir=$(make_case nm-no-upstream-pushed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt preserved "pushed without upstream"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "nm-no-upstream-pushed: fixture unexpectedly has an upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "nm-no-upstream-pushed: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "nm-no-upstream-pushed: live remote branch does not match local HEAD"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-no-upstream-pushed: teardown should accept work preserved on a live remote"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-no-upstream-pushed: teardown printed a REFUSED line"
+  pass "a live remote branch preserves pushed work without a configured upstream"
+}
+
+test_no_mistakes_local_upstream_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-local-upstream)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt local-only "local upstream is not delivery"
+  git -C "$case_dir/wt" branch --set-upstream-to=main fm/task-x1 >/dev/null
+
+  [ "$(git -C "$case_dir/wt" config --get branch.fm/task-x1.remote)" = . ] \
+    || fail "nm-local-upstream: fixture remote is not dot"
+  ! git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "nm-local-upstream: fixture branch unexpectedly exists on origin"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-local-upstream: teardown should reject a purely local upstream"
+  assert_grep "no live remote branch containing local HEAD" "$case_dir/stderr" \
+    "nm-local-upstream: refusal did not identify the missing live remote branch"
+  pass "a local upstream cannot prove remote preservation"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -755,7 +841,7 @@ test_no_mistakes_stale_remote_tracking_ref_refuses() {
   set -e
 
   expect_code 1 "$rc" "nm-stale-remote-ref: teardown should refuse a stale local tracking ref"
-  assert_grep "no live upstream branch containing local HEAD" "$case_dir/stderr" \
+  assert_grep "no live remote branch containing local HEAD" "$case_dir/stderr" \
     "nm-stale-remote-ref: refusal did not identify the missing live branch"
   pass "stale remote-tracking refs cannot disguise a branch deleted from the remote"
 }
@@ -1023,20 +1109,23 @@ test_gh_error_and_content_absent_refuses() {
 }
 
 test_stale_index_lock_cleared_and_teardown_succeeds() {
-  local case_dir rc lock
+  local case_dir rc lock remote_head
   case_dir=$(make_case stale-index-lock)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt preserved "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "stale-index-lock: fixture unexpectedly has an upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "stale-index-lock: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "stale-index-lock: live remote branch does not match local HEAD"
 
-  add_lock_aware_treehouse "$case_dir"
+  add_stale_lock_on_return_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
-  mkdir -p "$(dirname "$lock")"
-  : > "$lock"
-  touch -t 200001010000 "$lock"
+  [ ! -e "$lock" ] || fail "stale-index-lock: fixture lock exists before branch cleanup"
 
   set +e
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
@@ -1048,7 +1137,9 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "stale-index-lock: teardown did not report clearing the stale lock"
   assert_absent "$lock" "stale-index-lock: stale lock file should have been removed"
-  pass "provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds"
+  ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "stale-index-lock: local task branch survived teardown"
+  pass "stale-lock recovery preserves a remotely pushed task after deleting its local branch"
 }
 
 test_live_index_lock_is_never_removed_and_teardown_refuses() {
@@ -2801,6 +2892,8 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_no_mistakes_pushed_without_upstream_allows
+test_no_mistakes_local_upstream_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_no_mistakes_stale_remote_tracking_ref_refuses
 test_local_only_force_overrides_unpushed

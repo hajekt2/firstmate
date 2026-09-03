@@ -187,6 +187,7 @@ branch=$(git branch --show-current) &&
 git rev-parse --abbrev-ref '@{u}' &&
 remote=$(git config --get "branch.$branch.remote") &&
 remote_ref=$(git config --get "branch.$branch.merge") &&
+[ "$remote" != . ] &&
 git fetch --quiet --no-tags "$remote" "$remote_ref" &&
 remote_head=$(git ls-remote --exit-code --heads "$remote" "$remote_ref" | awk 'NR == 1 { print $1 }') &&
 git merge-base --is-ancestor HEAD "$remote_head"

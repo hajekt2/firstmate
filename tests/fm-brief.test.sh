@@ -235,6 +235,9 @@ test_remote_delivery_proof_is_required_only_for_pushed_modes() {
     assert_grep 'git ls-remote --exit-code --heads "$remote" "$remote_ref"' "$brief" \
       "$mode brief does not query the remote for the branch"
     # shellcheck disable=SC2016  # Shell variables must stay literal in the generated command.
+    assert_grep '[ "$remote" != . ]' "$brief" \
+      "$mode brief accepts a local branch as remote delivery proof"
+    # shellcheck disable=SC2016  # Shell variables must stay literal in the generated command.
     assert_grep 'git merge-base --is-ancestor HEAD "$remote_head"' "$brief" \
       "$mode brief does not prove the remote branch contains local HEAD"
     # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.

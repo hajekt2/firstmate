@@ -30,9 +30,9 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when the
-# branch has a configured upstream whose live remote head contains local HEAD (a fork
-# counts as that remote), OR - for a normal ship task whose commits are not so
+# hard-resets/removes the worktree and kills its processes. Work has landed when a
+# branch advertised by any configured remote contains local HEAD (a fork counts as
+# a remote), OR - for a normal ship task whose commits are not so
 # preserved - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -1485,8 +1485,8 @@ validate_worktree_teardown_safety() {
       echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
       return 1
     fi
-    if [ -n "$unmerged" ] && ! fm_git_live_upstream_contains_commit "$WT" "$branch" HEAD; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not preserved on a live upstream branch." >&2
+    if [ -n "$unmerged" ] && ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not preserved on a live remote branch." >&2
       printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -1496,12 +1496,12 @@ validate_worktree_teardown_safety() {
     echo "uncommitted changes present" >&2
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif ! fm_git_live_upstream_contains_commit "$WT" "$branch" HEAD; then
+  elif ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
     if ! work_is_landed "$branch"; then
       local_head=$(git -C "$WT" log --oneline -1 HEAD 2>/dev/null || printf 'unknown')
-      echo "REFUSED: worktree $WT has no live upstream branch containing local HEAD and its work has not landed." >&2
+      echo "REFUSED: worktree $WT has no live remote branch containing local HEAD and its work has not landed." >&2
       printf 'local HEAD:\n%s\n' "$local_head" >&2
-      echo "Push the branch with an upstream, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
