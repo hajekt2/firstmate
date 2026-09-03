@@ -10,7 +10,10 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
+# This file is the one owner of remote delivery proof in generated ship
+# instructions: a worker establishes an upstream, asks that remote for the
+# branch, and proves its live head contains local HEAD before reporting delivery.
+# This file is also the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
@@ -174,6 +177,26 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_remote_delivery_proof_block() {
+  cat <<'EOF'
+Before reporting a pushed branch as delivered, prove its upstream exists with `git rev-parse --abbrev-ref '@{u}'`.
+Then query that upstream's actual remote and require its live branch head to contain local `HEAD`:
+
+```sh
+branch=$(git branch --show-current) &&
+git rev-parse --abbrev-ref '@{u}' &&
+remote=$(git config --get "branch.$branch.remote") &&
+remote_ref=$(git config --get "branch.$branch.merge") &&
+git fetch --quiet --no-tags "$remote" "$remote_ref" &&
+remote_head=$(git ls-remote --exit-code --heads "$remote" "$remote_ref" | awk 'NR == 1 { print $1 }') &&
+git merge-base --is-ancestor HEAD "$remote_head"
+```
+
+For the usual `origin` target, this asks `git ls-remote --exit-code --heads origin` rather than inspecting `origin/<branch>` locally.
+A local remote-tracking ref such as `origin/<branch>` is not delivery evidence because it can be stale after the remote branch disappears.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -183,7 +206,11 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+EOF
+      fm_remote_delivery_proof_block
+      cat <<'EOF'
+Only after that proof succeeds, append `done: PR {url}` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -223,7 +250,11 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), prove the pushed branch is live on its upstream remote as follows.
+EOF
+      fm_remote_delivery_proof_block
+      cat <<'EOF'
+Only after that proof succeeds, append `done: PR {url} checks green` and stop. You are finished.
 EOF
       ;;
     *)

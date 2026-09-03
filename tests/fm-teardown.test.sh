@@ -2,7 +2,8 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
+# treehouse return hard-resets the worktree. "Landed" means local HEAD is contained
+# by a live upstream branch queried from its remote,
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
@@ -21,11 +22,11 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a live fork upstream branch       -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
-#   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
+#   (d) no-mistakes + HEAD on live origin upstream branch      -> ALLOW  (no regression)
+#   (e) no-mistakes + no upstream, no PR, content not default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
@@ -204,7 +205,7 @@ add_fork_with_pushed_branch() {
   git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
   # Push the task branch from the worktree to the fork, then fetch into project
   # so refs/remotes/fork/fm-task-x1 is visible from the worktree (shared object db).
-  git -C "$case_dir/wt" push -q fork fm/task-x1
+  git -C "$case_dir/wt" push -q -u fork fm/task-x1
   git -C "$case_dir/project" fetch -q fork
 }
 
@@ -683,13 +684,22 @@ test_local_only_merged_to_local_main_allows() {
 }
 
 test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
+  local case_dir rc upstream remote_head
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
-  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+
+  upstream=$(git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}') \
+    || fail "nm-origin: fully pushed fixture has no upstream"
+  [ "$upstream" = origin/fm/task-x1 ] \
+    || fail "nm-origin: unexpected upstream $upstream"
+  remote_head=$(git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 | awk 'NR == 1 { print $1 }') \
+    || fail "nm-origin: pushed branch is absent from the remote"
+  [ "$remote_head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] \
+    || fail "nm-origin: live remote branch does not match local HEAD"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -710,6 +720,8 @@ test_no_mistakes_truly_unpushed_refuses() {
   # Real content that is not pushed, has no PR (default gh-axi mock), and never
   # landed on origin/main: genuinely unlanded work that must still refuse.
   wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  ! git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "nm-unpushed: fixture unexpectedly has an upstream"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -719,6 +731,33 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_no_mistakes_stale_remote_tracking_ref_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-stale-remote-ref)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "locally disguised work"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/fm/task-x1
+
+  git -C "$case_dir/wt" rev-parse --verify refs/remotes/origin/fm/task-x1 >/dev/null \
+    || fail "nm-stale-remote-ref: fixture lost the stale remote-tracking ref"
+  git -C "$case_dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null \
+    || fail "nm-stale-remote-ref: fixture lost its configured upstream"
+  ! git -C "$case_dir/wt" ls-remote --exit-code --heads origin refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "nm-stale-remote-ref: fixture branch still exists on the remote"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-stale-remote-ref: teardown should refuse a stale local tracking ref"
+  assert_grep "no live upstream branch containing local HEAD" "$case_dir/stderr" \
+    "nm-stale-remote-ref: refusal did not identify the missing live branch"
+  pass "stale remote-tracking refs cannot disguise a branch deleted from the remote"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2209,7 +2248,7 @@ EOF
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 }
 
@@ -2763,6 +2802,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_stale_remote_tracking_ref_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
