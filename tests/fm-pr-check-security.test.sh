@@ -179,18 +179,24 @@ SH
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
   : > "$dir/guard.log"
+  git init -q --bare "$dir/remote.git"
+  git -C "$dir/wt" init -q
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m baseline
+  git -C "$dir/wt" remote add origin "$dir/remote.git"
+  git -C "$dir/wt" push -q origin HEAD:refs/heads/main
   printf '%s\n' "$dir"
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} mode=${3:-no-mistakes} kind=${4:-ship}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
-    "kind=ship" \
-    "mode=no-mistakes"
+    "kind=$kind" \
+    "mode=$mode"
 }
 
 write_poll_meta() {
@@ -612,6 +618,89 @@ SH
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
+}
+
+test_delivery_acceptance_requires_live_remote() {
+  local dir before after rc
+  dir=$(make_case delivery-without-remote)
+  write_task_meta "$dir"
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "local delivery"
+  before=$(state_snapshot "$dir/home/state")
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted a HEAD absent from every live remote"
+  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+    "missing remote delivery proof did not produce a clear refusal"
+  after=$(state_snapshot "$dir/home/state")
+  [ "$after" = "$before" ] || fail "refused remote delivery changed task state"
+  pass "PR delivery refuses a supplied URL when HEAD is absent from live remotes"
+}
+
+test_delivery_acceptance_allows_push_without_upstream() {
+  local dir
+  dir=$(make_case delivery-without-upstream)
+  write_task_meta "$dir"
+  ! git -C "$dir/wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+    || fail "push-without-upstream fixture unexpectedly has an upstream"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "PR delivery rejected a live remote branch without an upstream"
+  assert_grep 'pr=https://github.com/o/r/pull/2' "$dir/home/state/task-a.meta" \
+    "accepted push without upstream did not record PR metadata"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "accepted push without upstream did not publish its poll"
+  pass "PR delivery accepts a live remote branch without an upstream"
+}
+
+test_delivery_acceptance_rejects_local_upstream() {
+  local dir rc
+  dir=$(make_case delivery-local-upstream)
+  write_task_meta "$dir"
+  git -C "$dir/wt" branch local-base
+  printf '%s\n' local > "$dir/wt/local.txt"
+  git -C "$dir/wt" add local.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "local upstream delivery"
+  git -C "$dir/wt" branch --set-upstream-to=local-base >/dev/null
+  [ "$(git -C "$dir/wt" config --get "branch.$(git -C "$dir/wt" branch --show-current).remote")" = . ] \
+    || fail "local-upstream fixture did not configure remote dot"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "PR delivery accepted a purely local upstream"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "local upstream published a PR poll"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "local upstream recorded PR metadata"
+  pass "PR delivery rejects an upstream whose remote is dot"
+}
+
+test_non_pushing_modes_skip_remote_delivery_proof() {
+  local dir kind mode name
+  while IFS='|' read -r mode kind name; do
+    dir=$(make_case "non-pushing-$name")
+    write_task_meta "$dir" task-a "$mode" "$kind"
+    printf '%s\n' local > "$dir/wt/local.txt"
+    git -C "$dir/wt" add local.txt
+    git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+      commit -q -m "non-pushing mode"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr" \
+      || fail "$name was forced through remote delivery proof"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "$name did not retain its existing PR registration behavior"
+  done <<'EOF'
+local-only|ship|local-only
+no-mistakes|scout|scout
+EOF
+  pass "non-pushing task modes retain PR registration without remote proof"
 }
 
 run_watcher_bounded() {
@@ -2136,6 +2225,10 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
+test_delivery_acceptance_requires_live_remote
+test_delivery_acceptance_allows_push_without_upstream
+test_delivery_acceptance_rejects_local_upstream
+test_non_pushing_modes_skip_remote_delivery_proof
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
