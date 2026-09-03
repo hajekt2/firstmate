@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared live-remote proof for safety decisions that would otherwise trust stale
 # refs/remotes/* state. Every positive verdict begins with git ls-remote against
-# the configured remote. When an advertised tip object is absent locally, the
-# exact live branch ref is fetched into FETCH_HEAD before checking ancestry.
+# the configured remote. Advertised branch refs whose tip objects are absent
+# locally are fetched together before checking ancestry.
 #
 # Public functions:
 #   fm_git_live_remote_heads <repo>
@@ -16,17 +16,30 @@
 
 fm_git_live_remote_heads() {  # <repo>
   local repo=$1 remote heads line remote_head remote_ref
+  local -a missing_refs
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
     heads=$(git -C "$repo" ls-remote --heads "$remote" 2>/dev/null) || continue
+    missing_refs=()
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       remote_head=${line%%$'\t'*}
       remote_ref=${line#*$'\t'}
       [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
       if ! git -C "$repo" cat-file -e "$remote_head^{commit}" 2>/dev/null; then
-        git -C "$repo" fetch --quiet --no-tags "$remote" "$remote_ref" >/dev/null 2>&1 || true
+        missing_refs+=("$remote_ref")
       fi
+    done <<EOF
+$heads
+EOF
+    if [ "${#missing_refs[@]}" -gt 0 ]; then
+      git -C "$repo" fetch --quiet --no-tags "$remote" "${missing_refs[@]}" >/dev/null 2>&1 || true
+    fi
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      remote_head=${line%%$'\t'*}
+      remote_ref=${line#*$'\t'}
+      [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
       printf '%s\n' "$remote_head"
     done <<EOF
 $heads

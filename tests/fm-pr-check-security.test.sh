@@ -22,6 +22,7 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
+REAL_GIT=$(command -v git)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
@@ -764,6 +765,67 @@ test_delivery_acceptance_rejects_local_upstream() {
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "local upstream published a PR poll"
   assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "local upstream recorded PR metadata"
   pass "PR delivery rejects an upstream whose remote is dot"
+}
+
+test_live_remote_proof_batches_missing_branch_fetches() {
+  local dir writer repo fakebin log i missing fetch_count ls_remote_count sha ref
+  dir="$TMP_ROOT/live-remote-batched-fetch"
+  writer="$dir/writer"
+  repo="$dir/repo"
+  fakebin="$dir/fakebin"
+  log="$dir/git-calls"
+  mkdir -p "$fakebin"
+  git init -q --bare "$dir/remote.git"
+  git clone -q "$dir/remote.git" "$writer" 2>/dev/null
+  git -C "$writer" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m baseline
+  git -C "$writer" push -q origin HEAD:main
+  git clone -q --single-branch --branch main "$dir/remote.git" "$repo"
+  for i in 1 2 3; do
+    git -C "$writer" checkout -q -B "remote-$i" main
+    git -C "$writer" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+      commit -q --allow-empty -m "remote $i"
+    git -C "$writer" push -q origin "remote-$i"
+  done
+
+  missing=0
+  while read -r sha ref; do
+    case "$ref" in
+      refs/heads/remote-*)
+        if ! git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null; then
+          missing=$((missing + 1))
+        fi
+        ;;
+    esac
+  done < <("$REAL_GIT" -C "$repo" ls-remote --heads origin)
+  [ "$missing" -eq 3 ] || fail "batched-fetch fixture did not have three missing branch tips"
+
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    fetch|ls-remote)
+      printf '%s\n' "$arg" >> "$FM_TEST_GIT_CALL_LOG"
+      break
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  : > "$log"
+  FM_TEST_REAL_GIT="$REAL_GIT" FM_TEST_GIT_CALL_LOG="$log" PATH="$fakebin:$BASE_PATH" \
+    bash -c '. "$1"; fm_git_commit_is_on_live_remote "$2" HEAD' \
+      _ "$ROOT/bin/fm-git-live-remote-lib.sh" "$repo" \
+    || fail "batched live-remote proof rejected an ancestor of advertised branches"
+
+  fetch_count=$(grep -c '^fetch$' "$log" || true)
+  ls_remote_count=$(grep -c '^ls-remote$' "$log" || true)
+  [ "$fetch_count" -eq 1 ] \
+    || fail "live-remote proof fetched $fetch_count times for one remote"
+  [ "$ls_remote_count" -eq 1 ] \
+    || fail "live-remote proof advertised one remote $ls_remote_count times"
+  pass "live-remote proof fetches missing branch tips once per remote"
 }
 
 test_non_pushing_modes_skip_remote_delivery_proof() {
@@ -2313,6 +2375,7 @@ test_legacy_ship_without_mode_requires_live_remote
 test_delivery_acceptance_uses_locked_metadata
 test_delivery_acceptance_allows_push_without_upstream
 test_delivery_acceptance_rejects_local_upstream
+test_live_remote_proof_batches_missing_branch_fetches
 test_non_pushing_modes_skip_remote_delivery_proof
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
