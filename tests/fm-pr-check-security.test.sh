@@ -693,8 +693,9 @@ test_legacy_task_without_kind_requires_live_remote() {
 }
 
 test_delivery_acceptance_uses_locked_metadata() {
-  local dir lock holder check_pid rc i tmp
+  local dir case_dir lock holder check_pid rc i tmp
   dir=$(make_case delivery-promotion-race)
+  case_dir=$dir
   write_task_meta "$dir" task-a no-mistakes scout
   printf '%s\n' local > "$dir/wt/local.txt"
   git -C "$dir/wt" add local.txt
@@ -722,33 +723,33 @@ SH
   ) &
   holder=$!
   i=0
-  while [ ! -e "$dir/meta-lock.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
-  [ -e "$dir/meta-lock.ready" ] || fail "promotion race could not hold the metadata lock"
+  while [ ! -e "$case_dir/meta-lock.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$case_dir/meta-lock.ready" ] || fail "promotion race could not hold the metadata lock"
 
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/6 > "$dir/stdout" 2> "$dir/stderr" &
+  run_check_entry "$case_dir" task-a https://github.com/o/r/pull/6 > "$case_dir/stdout" 2> "$case_dir/stderr" &
   check_pid=$!
   i=0
-  while [ ! -e "$dir/poll-prepare.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
-  if [ ! -e "$dir/poll-prepare.ready" ]; then
-    : > "$dir/meta-rewrite"
-    : > "$dir/poll-prepare.release"
+  while [ ! -e "$case_dir/poll-prepare.ready" ] && [ "$i" -lt 200 ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$case_dir/poll-prepare.ready" ]; then
+    : > "$case_dir/meta-rewrite"
+    : > "$case_dir/poll-prepare.release"
     wait "$holder" 2>/dev/null || true
     wait "$check_pid" 2>/dev/null || true
     fail "promotion race did not reach pre-lock poll preparation"
   fi
-  : > "$dir/meta-rewrite"
+  : > "$case_dir/meta-rewrite"
   wait "$holder" || fail "promotion race could not publish ship metadata"
-  : > "$dir/poll-prepare.release"
+  : > "$case_dir/poll-prepare.release"
   set +e
   wait "$check_pid"
   rc=$?
   set -e
 
   [ "$rc" -ne 0 ] || fail "PR delivery accepted stale scout metadata after promotion"
-  assert_grep "worktree HEAD is not present on any live remote branch" "$dir/stderr" \
+  assert_grep "worktree HEAD is not present on any live remote branch" "$case_dir/stderr" \
     "locked ship metadata did not trigger remote delivery refusal"
-  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "promotion race published a PR poll"
-  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "promotion race recorded PR metadata"
+  [ ! -e "$case_dir/home/state/task-a.check.sh" ] || fail "promotion race published a PR poll"
+  assert_no_grep '^pr=' "$case_dir/home/state/task-a.meta" "promotion race recorded PR metadata"
   pass "PR delivery decides promotion races from metadata read under lock"
 }
 
