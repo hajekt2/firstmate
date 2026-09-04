@@ -1471,27 +1471,29 @@ validate_worktree_teardown_safety() {
   fi
 
   if [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-      fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ]; then
       echo "REFUSED: local-only worktree $WT has uncommitted changes." >&2
       echo "uncommitted changes present" >&2
       echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
       return 1
     fi
-    if [ -n "$unmerged" ] && ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not preserved on a live remote branch." >&2
-      printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
+    if ! fm_git_commit_is_on_live_remote "$WT" HEAD; then
+      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+        if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+          return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+        fi
+        echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+        echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
+      unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+      if [ -n "$unmerged" ]; then
+        echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not preserved on a live remote branch." >&2
+        printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+        echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2

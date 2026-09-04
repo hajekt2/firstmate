@@ -52,6 +52,7 @@
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 #   (z) pushed without upstream                               -> ALLOW
 #   (aa) local upstream only                                  -> REFUSE
+#   (ab) local-only + live remote + no default branch         -> ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -667,6 +668,27 @@ test_local_only_fork_remote_allows() {
   ' "$case_dir/state/home-summary.json" >/dev/null \
     || fail "successful task teardown did not publish the task's removal from the home summary ledger"
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
+}
+
+test_local_only_live_remote_without_default_branch_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-without-default-allow)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" branch -m main trunk
+  git -C "$case_dir/project" remote set-head origin --delete
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "fork-without-default-allow: live remote proof should not require a default branch"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "fork-without-default-allow: teardown printed a REFUSED line"
+  pass "local-only work preserved on a live remote does not require a default branch"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -2929,6 +2951,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_local_only_live_remote_without_default_branch_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
