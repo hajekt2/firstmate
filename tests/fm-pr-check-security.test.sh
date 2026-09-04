@@ -781,6 +781,35 @@ test_delivery_acceptance_allows_push_without_upstream() {
   pass "PR delivery accepts a live remote branch without an upstream"
 }
 
+test_delivery_acceptance_uses_pushurl() {
+  local dir head
+  dir=$(make_case delivery-pushurl)
+  write_task_meta "$dir"
+  git init -q --bare "$dir/fork-one.git"
+  git init -q --bare "$dir/fork-two.git"
+  git -C "$dir/wt" remote set-url --push origin "$dir/fork-one.git"
+  git -C "$dir/wt" remote set-url --add --push origin "$dir/fork-two.git"
+  printf '%s\n' delivered > "$dir/wt/delivered.txt"
+  git -C "$dir/wt" add delivered.txt
+  git -C "$dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q -m "pushurl task delivery"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" push -q origin HEAD:refs/heads/task-a
+  git -C "$dir/wt" push -q "$dir/fork-one.git" :refs/heads/task-a
+  [ -z "$(git -C "$dir/wt" ls-remote "$dir/remote.git" refs/heads/task-a)" ] \
+    || fail "pushurl fixture unexpectedly published the task branch to the fetch URL"
+  [ -z "$(git -C "$dir/wt" ls-remote "$dir/fork-one.git" refs/heads/task-a)" ] \
+    || fail "pushurl fixture retained the task branch on its first push destination"
+  [ "$(git -C "$dir/wt" ls-remote "$dir/fork-two.git" refs/heads/task-a | awk 'NR == 1 { print $1 }')" = "$head" ] \
+    || fail "pushurl fixture did not retain the task branch on its second push destination"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/14 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "PR delivery ignored the configured pushurl"
+  assert_grep 'pr=https://github.com/o/r/pull/14' "$dir/home/state/task-a.meta" \
+    "accepted pushurl delivery did not record PR metadata"
+  pass "PR delivery probes every configured pushurl"
+}
+
 test_delivery_probe_failures_are_bounded_and_actionable() {
   local behavior expected dir rc
   while IFS='|' read -r behavior expected; do
@@ -2663,6 +2692,7 @@ test_legacy_ship_without_mode_requires_live_remote
 test_legacy_task_without_kind_requires_live_remote
 test_delivery_acceptance_uses_locked_metadata
 test_delivery_acceptance_allows_push_without_upstream
+test_delivery_acceptance_uses_pushurl
 test_delivery_probe_failures_are_bounded_and_actionable
 test_delivery_probe_rechecks_head_after_unlock
 test_delivery_probe_rechecks_metadata_after_unlock

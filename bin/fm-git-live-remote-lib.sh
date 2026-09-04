@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Shared live-remote proof for safety decisions that would otherwise trust stale
 # refs/remotes/* state. Every positive verdict begins with git ls-remote against
-# the configured remote. Advertised branch refs whose tip objects are absent
-# locally are fetched together before checking ancestry.
+# a configured push destination. Local transports count only when their Git
+# common directory differs from this repository. Other transports prove only
+# that a remote Git process advertised the branch, not that it reads a repository
+# independent of this working copy.
+# Advertised branch refs whose tip objects are absent locally are fetched together
+# before checking ancestry.
 #
 # Public functions:
 #   fm_git_live_remote_deadline
 #     Print one absolute deadline from the configured overall probe budget.
 #   fm_git_live_remote_heads <repo> [deadline]
-#     Print the commit IDs advertised by every configured remote branch after
+#     Print the commit IDs advertised by every configured push destination after
 #     fetching any advertised tip object that is not present locally.
 #   fm_git_commit_is_in_live_remote_heads <repo> <commit> <heads> [deadline]
 #     True when commit is contained by a captured live-remote head set.
 #   fm_git_commit_is_on_live_remote <repo> <commit> [deadline]
 #     True when the commit is contained by any branch currently advertised by
-#     any configured remote.
+#     any configured push destination.
 
 if ! command -v fm_run_timed >/dev/null 2>&1; then
   # shellcheck source=bin/fm-timeout-lib.sh
@@ -121,10 +125,78 @@ fm_git_live_remote_local_common_dir() {  # <repo-real> <url> <deadline> <operati
   fm_git_live_remote_common_dir "$path" "$deadline" "$operation_timeout"
 }
 
-fm_git_live_remote_heads() {  # <repo> [deadline]
-  local repo=$1 deadline=${2:-} operation_timeout remotes remote remote_url heads line
-  local remote_head remote_ref rc status=0 repo_real common_dir remote_common_dir scan_exhausted=0
+fm_git_live_remote_heads_for_url() {  # <repo> <repo-real> <common-dir> <url> <deadline> <operation-timeout>
+  local repo=$1 repo_real=$2 common_dir=$3 remote_url=$4 deadline=$5 operation_timeout=$6
+  local remote_common_dir heads line remote_head remote_ref rc=0 status=0 scan_exhausted=0
   local -a missing_refs
+  remote_common_dir=$(fm_git_live_remote_local_common_dir \
+    "$repo_real" "$remote_url" "$deadline" "$operation_timeout") || rc=$?
+  case "$rc" in
+    0) [ "$remote_common_dir" != "$common_dir" ] || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+    "$FM_GIT_LIVE_REMOTE_NON_LOCAL") ;;
+    "$FM_GIT_LIVE_REMOTE_TIMEOUT"|"$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED"|"$FM_GIT_LIVE_REMOTE_PROBE_FAILED") return "$rc" ;;
+    *) return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED" ;;
+  esac
+  if heads=$(fm_git_live_remote_run "$deadline" "$operation_timeout" \
+    -C "$repo" ls-remote --heads "$remote_url" 2>/dev/null); then
+    :
+  else
+    rc=$?
+    return "$rc"
+  fi
+  missing_refs=()
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    remote_head=${line%%$'\t'*}
+    remote_ref=${line#*$'\t'}
+    [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
+    rc=0
+    fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+      -C "$repo" cat-file -e "$remote_head^{commit}" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) ;;
+      124)
+        status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT")
+        missing_refs+=("$remote_ref")
+        ;;
+      "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED")
+        status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
+        scan_exhausted=1
+        break
+        ;;
+      *) missing_refs+=("$remote_ref") ;;
+    esac
+  done <<EOF
+$heads
+EOF
+  if [ "$scan_exhausted" -eq 0 ] && [ "${#missing_refs[@]}" -gt 0 ]; then
+    if fm_git_live_remote_run "$deadline" "$operation_timeout" \
+      -C "$repo" fetch --quiet --no-tags "$remote_url" "${missing_refs[@]}" >/dev/null 2>&1; then
+      :
+    else
+      rc=$?
+      status=$(fm_git_live_remote_note_status "$status" "$rc")
+    fi
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
+      break
+    fi
+    remote_head=${line%%$'\t'*}
+    remote_ref=${line#*$'\t'}
+    [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
+    printf '%s\n' "$remote_head"
+  done <<EOF
+$heads
+EOF
+  return "$status"
+}
+
+fm_git_live_remote_heads() {  # <repo> [deadline]
+  local repo=$1 deadline=${2:-} operation_timeout remotes remote remote_urls remote_url url_heads
+  local rc status=0 repo_real common_dir
   operation_timeout=$(fm_git_live_remote_operation_timeout) || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
   [ -n "$deadline" ] || deadline=$(fm_git_live_remote_deadline) \
     || return "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"
@@ -151,91 +223,28 @@ fm_git_live_remote_heads() {  # <repo> [deadline]
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
     rc=0
-    remote_url=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
-      -C "$repo" remote get-url "$remote" 2>/dev/null) || rc=$?
+    remote_urls=$(fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
+      -C "$repo" remote get-url --push --all "$remote" 2>/dev/null) || rc=$?
     case "$rc" in
       0) ;;
       124) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT"); continue ;;
       "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED") status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED; break ;;
       *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"); continue ;;
     esac
-    rc=0
-    remote_common_dir=$(fm_git_live_remote_local_common_dir \
-      "$repo_real" "$remote_url" "$deadline" "$operation_timeout") || rc=$?
-    case "$rc" in
-      0)
-        if [ "$remote_common_dir" = "$common_dir" ]; then
-          status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED")
-          continue
-        fi
-        ;;
-      "$FM_GIT_LIVE_REMOTE_NON_LOCAL") ;;
-      "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED") status=$rc; break ;;
-      "$FM_GIT_LIVE_REMOTE_TIMEOUT") status=$(fm_git_live_remote_note_status "$status" "$rc"); continue ;;
-      *) status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_PROBE_FAILED"); continue ;;
-    esac
-    if heads=$(fm_git_live_remote_run "$deadline" "$operation_timeout" \
-      -C "$repo" ls-remote --heads "$remote" 2>/dev/null); then
-      :
-    else
-      rc=$?
-      case "$rc" in
-        "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED") status=$rc; break ;;
-        "$FM_GIT_LIVE_REMOTE_TIMEOUT") status=$rc ;;
-        *) [ "$status" -ne 0 ] || status=$FM_GIT_LIVE_REMOTE_PROBE_FAILED ;;
-      esac
-      continue
-    fi
-    missing_refs=()
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      remote_head=${line%%$'\t'*}
-      remote_ref=${line#*$'\t'}
-      [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
+    while IFS= read -r remote_url; do
+      [ -n "$remote_url" ] || continue
       rc=0
-      fm_git_live_remote_run_raw "$deadline" "$operation_timeout" \
-        -C "$repo" cat-file -e "$remote_head^{commit}" >/dev/null 2>&1 || rc=$?
-      case "$rc" in
-        0) ;;
-        124)
-          status=$(fm_git_live_remote_note_status "$status" "$FM_GIT_LIVE_REMOTE_TIMEOUT")
-          missing_refs+=("$remote_ref")
-          ;;
-        "$FM_GIT_LIVE_REMOTE_RAW_BUDGET_EXHAUSTED")
-          status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
-          scan_exhausted=1
-          break
-          ;;
-        *) missing_refs+=("$remote_ref") ;;
-      esac
-    done <<EOF
-$heads
-EOF
-    if [ "$scan_exhausted" -eq 0 ] && [ "${#missing_refs[@]}" -gt 0 ]; then
-      if fm_git_live_remote_run "$deadline" "$operation_timeout" \
-        -C "$repo" fetch --quiet --no-tags "$remote" "${missing_refs[@]}" >/dev/null 2>&1; then
+      if url_heads=$(fm_git_live_remote_heads_for_url \
+        "$repo" "$repo_real" "$common_dir" "$remote_url" "$deadline" "$operation_timeout"); then
         :
       else
         rc=$?
-        case "$rc" in
-          "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED") status=$rc ;;
-          "$FM_GIT_LIVE_REMOTE_TIMEOUT") [ "$status" -eq "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ] || status=$rc ;;
-          *) [ "$status" -ne 0 ] || status=$FM_GIT_LIVE_REMOTE_PROBE_FAILED ;;
-        esac
       fi
-    fi
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      if [ "$SECONDS" -ge "$deadline" ]; then
-        status=$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED
-        break
-      fi
-      remote_head=${line%%$'\t'*}
-      remote_ref=${line#*$'\t'}
-      [ -n "$remote_head" ] && [ "$remote_ref" != "$line" ] || continue
-      printf '%s\n' "$remote_head"
+      [ -z "$url_heads" ] || printf '%s\n' "$url_heads"
+      status=$(fm_git_live_remote_note_status "$status" "$rc")
+      [ "$status" -ne "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ] || break
     done <<EOF
-$heads
+$remote_urls
 EOF
     [ "$status" -ne "$FM_GIT_LIVE_REMOTE_BUDGET_EXHAUSTED" ] || break
   done <<EOF

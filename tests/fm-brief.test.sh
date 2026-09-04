@@ -231,14 +231,14 @@ test_remote_delivery_proof_is_required_only_for_pushed_modes() {
     brief="$home/data/$id/brief.md"
     assert_no_grep "git rev-parse --abbrev-ref '@{u}'" "$brief" \
       "$mode brief incorrectly requires a configured upstream"
-    assert_grep 'preserved somewhere independent of this working copy' "$brief" \
-      "$mode brief does not require delivery independent of the working repository"
-    assert_grep "remote that resolves to this repository's Git common directory does not count" "$brief" \
-      "$mode brief permits its working repository to prove its own delivery"
+    assert_grep 'local path or `file://` destination' "$brief" \
+      "$mode brief does not define the local repository identity boundary"
+    assert_grep 'proves only that a remote Git process advertised the branch' "$brief" \
+      "$mode brief overstates the identity guarantee for non-local remotes"
     assert_grep 'without `-u` is valid delivery' "$brief" \
       "$mode brief does not permit a push without upstream configuration"
-    assert_grep 'each remote with a live, non-interactive, time-bounded `git ls-remote --heads`' "$brief" \
-      "$mode brief does not require bounded live advertisements from configured remotes"
+    assert_grep 'each configured push destination with a live, non-interactive, time-bounded `git ls-remote --heads`' "$brief" \
+      "$mode brief does not require bounded live advertisements from push destinations"
     assert_grep 'require an advertised tip to equal local `HEAD` or contain it' "$brief" \
       "$mode brief does not require live remote containment of local HEAD"
     # shellcheck disable=SC2016  # Literal backticks are part of the rendered brief.

@@ -179,9 +179,11 @@ EOF
 
 fm_remote_delivery_proof_block() {
   cat <<'EOF'
-Before reporting a pushed branch as delivered, prove the work is preserved somewhere independent of this working copy: local `HEAD` must be contained by a branch currently advertised by at least one configured remote, and a remote that resolves to this repository's Git common directory does not count.
+Before reporting a pushed branch as delivered, require local `HEAD` to be contained by a branch currently advertised at a configured push destination.
+For a local path or `file://` destination, it counts only when Git resolves it to a different common directory, which proves the work is preserved outside this working copy.
+For SSH, HTTPS, and other non-local destinations, this proves only that a remote Git process advertised the branch; it cannot establish that the process reads a repository independent of this working copy.
 Do not require a configured upstream: `git push origin HEAD:refs/heads/<branch>` without `-u` is valid delivery.
-Query each remote with a live, non-interactive, time-bounded `git ls-remote --heads`, fetch advertised branch tips that are missing locally, and require an advertised tip to equal local `HEAD` or contain it according to `git merge-base --is-ancestor`.
+Query each configured push destination with a live, non-interactive, time-bounded `git ls-remote --heads`, fetch advertised branch tips that are missing locally, and require an advertised tip to equal local `HEAD` or contain it according to `git merge-base --is-ancestor`.
 A timeout, authentication failure, unreachable remote, or exhausted probe budget means delivery is unproven, so stop and report the failure instead of claiming completion.
 A local remote-tracking ref such as `origin/<branch>` is not delivery evidence because it can be stale after the remote branch disappears.
 EOF
