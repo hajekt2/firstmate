@@ -3,7 +3,7 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means local HEAD is contained
-# by a branch advertised by any configured remote,
+# by a branch advertised at any configured push destination,
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
@@ -26,7 +26,7 @@
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
 #   (d) no-mistakes + HEAD on live origin remote branch        -> ALLOW  (no regression)
-#   (e) no-mistakes + no upstream, no PR, content not default  -> REFUSE (safety)
+#   (e) no-mistakes + HEAD absent remotely, no PR/default copy -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
@@ -206,7 +206,7 @@ add_fork_with_pushed_branch() {
   git init -q --bare "$case_dir/fork.git"
   git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
   # Push the task branch from the worktree to the fork, then fetch into project
-  # so refs/remotes/fork/fm-task-x1 is visible from the worktree (shared object db).
+  # for the fixture's shared object database and remote-tracking state.
   git -C "$case_dir/wt" push -q -u fork fm/task-x1
   git -C "$case_dir/project" fetch -q fork
 }

@@ -11,8 +11,8 @@
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of remote delivery proof in generated ship
-# instructions: a worker establishes an upstream, asks that remote for the
-# branch, and proves its live head contains local HEAD before reporting delivery.
+# instructions: a worker asks every configured push destination for its branches
+# and proves one advertised head contains local HEAD before reporting delivery.
 # This file is also the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.

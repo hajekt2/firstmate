@@ -31,8 +31,8 @@
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when a
-# branch advertised by any configured remote contains local HEAD (a fork counts as
-# a remote), OR - for a normal ship task whose commits are not so
+# branch advertised by any configured push destination contains local HEAD (a fork
+# counts as a remote), OR - for a normal ship task whose commits are not so
 # preserved - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -1177,8 +1177,8 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# Has the worktree's committed work actually LANDED, though no live remote branch
+# contains local HEAD? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # only for genuinely unlanded work.

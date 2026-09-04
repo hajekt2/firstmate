@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: first prove that a live push destination advertises a
+# branch containing the ship worktree's current HEAD, then store one validated
+# canonical pr=<url> and the forge's exact pr_head=<sha> when available and
+# atomically arm a static merge poll. Scout and non-pushing modes skip that proof.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
